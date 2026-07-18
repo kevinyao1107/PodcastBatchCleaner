@@ -1,0 +1,201 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PodcastBatchCleaner.CrossPlatform.MainWindow"
+        Title="音檔批次調整工具"
+        Width="1180"
+        Height="760"
+        MinWidth="980"
+        MinHeight="640"
+        Background="#090B10"
+        Foreground="#EEF2F7">
+    <Window.Styles>
+        <Style Selector="Button">
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="Padding" Value="14,6" />
+            <Setter Property="Margin" Value="0,0,8,0" />
+            <Setter Property="CornerRadius" Value="17" />
+            <Setter Property="Background" Value="#222A38" />
+            <Setter Property="BorderBrush" Value="#2B3342" />
+            <Setter Property="Foreground" Value="#EEF2F7" />
+        </Style>
+        <Style Selector="Button.primary">
+            <Setter Property="Background" Value="#36C2A6" />
+            <Setter Property="BorderBrush" Value="#36C2A6" />
+            <Setter Property="Foreground" Value="#07100E" />
+        </Style>
+        <Style Selector="TextBox">
+            <Setter Property="MinHeight" Value="31" />
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="Background" Value="#0D111A" />
+            <Setter Property="BorderBrush" Value="#2B3342" />
+            <Setter Property="Foreground" Value="#EEF2F7" />
+        </Style>
+        <Style Selector="ComboBox">
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Background" Value="#0D111A" />
+            <Setter Property="BorderBrush" Value="#2B3342" />
+            <Setter Property="Foreground" Value="#EEF2F7" />
+        </Style>
+        <Style Selector="ListBox">
+            <Setter Property="Background" Value="#121722" />
+            <Setter Property="BorderThickness" Value="0" />
+        </Style>
+        <Style Selector="ListBoxItem">
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="Margin" Value="6,2" />
+            <Setter Property="CornerRadius" Value="8" />
+        </Style>
+        <Style Selector="TextBlock.muted">
+            <Setter Property="Foreground" Value="#9AA4B2" />
+        </Style>
+    </Window.Styles>
+
+    <DockPanel>
+        <Border DockPanel.Dock="Top"
+                Background="#121722"
+                BorderBrush="#2B3342"
+                BorderThickness="0,0,0,1"
+                Padding="14,12">
+            <Grid ColumnDefinitions="Auto,*,Auto">
+                <StackPanel Orientation="Horizontal">
+                    <Button Content="選取資料夾" Click="SelectFolder_Click" />
+                    <Button Content="輸出位置" Click="ChooseOutputFolder_Click" />
+                    <Button Content="指定 FFmpeg" Click="ChooseFfmpeg_Click" />
+                </StackPanel>
+
+                <TextBlock Grid.Column="1"
+                           Margin="8,0"
+                           VerticalAlignment="Center"
+                           Text="{Binding CurrentFolderText}"
+                           TextTrimming="CharacterEllipsis"
+                           Classes="muted" />
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button Classes="primary" Content="處理選取" Click="ProcessSelected_Click" />
+                    <Button Classes="primary" Content="全部輸出" Click="ProcessAll_Click" />
+                    <Button Content="取消" Click="CancelProcessing_Click" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border DockPanel.Dock="Bottom"
+                Background="#121722"
+                BorderBrush="#2B3342"
+                BorderThickness="0,1,0,0"
+                Padding="10,7">
+            <TextBlock Text="{Binding StatusText}" Classes="muted" />
+        </Border>
+
+        <Grid Margin="14" ColumnDefinitions="2.2*,14,1*">
+            <Border Grid.Column="0"
+                    Background="#121722"
+                    BorderBrush="#2B3342"
+                    BorderThickness="1"
+                    CornerRadius="12">
+                <Grid RowDefinitions="Auto,*">
+                    <Border Background="#171D2A"
+                            BorderBrush="#2B3342"
+                            BorderThickness="0,0,0,1"
+                            CornerRadius="12,12,0,0"
+                            Padding="14,12">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="資料夾音檔清單" />
+                            <TextBlock Grid.Column="1" Text="{Binding FileCountText}" Classes="muted" />
+                        </Grid>
+                    </Border>
+
+                    <ListBox x:Name="AudioList"
+                             Grid.Row="1"
+                             ItemsSource="{Binding AudioFiles}"
+                             SelectionChanged="AudioList_SelectionChanged">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="2*,80,120,180,2*" ColumnSpacing="10">
+                                    <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="1" Text="{Binding DurationText}" Classes="muted" />
+                                    <TextBlock Grid.Column="2" Text="{Binding Status}" Classes="muted" />
+                                    <TextBox Grid.Column="3"
+                                             Text="{Binding CustomOutputFileName}"
+                                             Watermark="輸出檔名" />
+                                    <TextBlock Grid.Column="4" Text="{Binding ProcessedFileName}" TextTrimming="CharacterEllipsis" Classes="muted" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="2"
+                    Background="#121722"
+                    BorderBrush="#2B3342"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    Padding="14">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="處理設定" />
+
+                        <TextBlock Margin="0,18,0,6" Text="空拍超過多久刪除（0.1 - 1.0 秒）" Classes="muted" />
+                        <Grid ColumnDefinitions="*,58">
+                            <Slider Minimum="0.1" Maximum="1" TickFrequency="0.1" IsSnapToTickEnabled="True"
+                                    Value="{Binding SilenceSeconds}" />
+                            <TextBox Grid.Column="1" Margin="8,0,0,0" Text="{Binding SilenceSeconds}" />
+                        </Grid>
+
+                        <TextBlock Margin="0,14,0,6" Text="空拍判定門檻 dBFS" Classes="muted" />
+                        <Grid ColumnDefinitions="*,58">
+                            <Slider Minimum="-80" Maximum="-5" TickFrequency="1" Value="{Binding SilenceThresholdDb}" />
+                            <TextBox Grid.Column="1" Margin="8,0,0,0" Text="{Binding SilenceThresholdDb}" />
+                        </Grid>
+
+                        <CheckBox Margin="0,16,0,0" Content="統一降噪" IsChecked="{Binding EnableDenoise}" />
+                        <CheckBox Margin="0,10,0,0" Content="減少空間音" IsChecked="{Binding ReduceRoomTone}" />
+
+                        <TextBlock Margin="0,18,0,6" Text="音量增益 dB" Classes="muted" />
+                        <Grid ColumnDefinitions="*,62">
+                            <Slider Minimum="-24" Maximum="24" TickFrequency="0.5" IsSnapToTickEnabled="True"
+                                    Value="{Binding VolumeGainDb}" />
+                            <TextBox Grid.Column="1" Margin="8,0,0,0" Text="{Binding VolumeGainDb}" />
+                        </Grid>
+
+                        <Separator Margin="0,20" />
+
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="播放" />
+                        <TextBlock Margin="0,12,0,6" Text="{Binding SelectedFileText}" TextWrapping="Wrap" Classes="muted" />
+
+                        <ComboBox Margin="0,4,0,12" SelectedIndex="{Binding PlaybackSourceIndex}" SelectionChanged="PlaybackSource_SelectionChanged">
+                            <ComboBoxItem Content="播放原始音檔" />
+                            <ComboBoxItem Content="播放處理後音檔" />
+                        </ComboBox>
+
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="播放" Click="Play_Click" />
+                            <Button Content="暫停" Click="Pause_Click" />
+                            <Button Content="停止" Click="Stop_Click" />
+                        </StackPanel>
+
+                        <Slider x:Name="PositionSlider"
+                                Margin="0,14,0,4"
+                                Minimum="0"
+                                Maximum="1"
+                                PointerPressed="PositionSlider_PointerPressed"
+                                PointerReleased="PositionSlider_PointerReleased"
+                                ValueChanged="PositionSlider_ValueChanged" />
+
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="{Binding PlaybackPositionText}" Classes="muted" />
+                            <TextBlock Grid.Column="1" Text="{Binding PlaybackDurationText}" Classes="muted" />
+                        </Grid>
+
+                        <Separator Margin="0,20" />
+
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="工具狀態" />
+                        <TextBlock Margin="0,10,0,0" Text="{Binding FfmpegPathText}" TextWrapping="Wrap" Classes="muted" />
+                        <TextBlock Margin="0,10,0,0" Text="{Binding OutputFolderText}" TextWrapping="Wrap" Classes="muted" />
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+    </DockPanel>
+</Window>
