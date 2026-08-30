@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -20,6 +21,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly FfmpegAudioProcessor _processor = new();
     private readonly MediaPlayer _player = new();
     private readonly DispatcherTimer _playbackTimer;
+    private static readonly JsonSerializerOptions SettingsJsonOptions = new() { WriteIndented = true };
     private CancellationTokenSource? _processingCancellation;
     private AudioFileItem? _selectedFile;
     private string? _currentFolder;
@@ -72,6 +74,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _player.MediaOpened += Player_MediaOpened;
         _player.MediaEnded += Player_MediaEnded;
         _player.MediaFailed += Player_MediaFailed;
+
+        LoadSettings();
     }
 
     public ObservableCollection<AudioFileItem> AudioFiles { get; } = [];
@@ -272,18 +276,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        _ffmpegPath = FfmpegAudioProcessor.TryFindFfmpeg();
+        if (string.IsNullOrWhiteSpace(_ffmpegPath) || !File.Exists(_ffmpegPath))
+        {
+            _ffmpegPath = FfmpegAudioProcessor.TryFindFfmpeg();
+        }
+
         OnPropertyChanged(nameof(FfmpegPathText));
 
         StatusText = _ffmpegPath is null
             ? "找不到 FFmpeg。播放可使用；輸出前請指定 ffmpeg.exe。"
             : "已找到 FFmpeg，可以選取資料夾開始。";
 
+        if (!string.IsNullOrWhiteSpace(_currentFolder) && Directory.Exists(_currentFolder))
+        {
+            await LoadAudioFilesAsync(_currentFolder);
+        }
+
         await Task.CompletedTask;
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
+        SaveSettings();
         _processingCancellation?.Cancel();
         _playbackTimer.Stop();
         _player.Close();
@@ -1057,6 +1071,129 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return aiPath ?? item.FilePath;
     }
 
+    private void LoadSettings()
+    {
+        try
+        {
+            var settingsPath = GetSettingsPath();
+            if (!File.Exists(settingsPath))
+            {
+                return;
+            }
+
+            var json = File.ReadAllText(settingsPath);
+            var settings = JsonSerializer.Deserialize<AppSettings>(json);
+            if (settings is null)
+            {
+                return;
+            }
+
+            _currentFolder = settings.CurrentFolder;
+            _outputFolder = settings.OutputFolder;
+            _aiAudioFolder = settings.AiAudioFolder;
+            _ffmpegPath = settings.FfmpegPath;
+            _introAudioPath = settings.IntroAudioPath;
+            _outroAudioPath = settings.OutroAudioPath;
+            _coverImagePath = settings.CoverImagePath;
+
+            SilenceSeconds = settings.SilenceSeconds;
+            SilenceThresholdDb = settings.SilenceThresholdDb;
+            EnableDenoise = settings.EnableDenoise;
+            UseAiProcessedAudio = settings.UseAiProcessedAudio;
+            ReduceRoomTone = settings.ReduceRoomTone;
+            EnhanceVoiceEq = settings.EnhanceVoiceEq;
+            NormalizeLoudness = settings.NormalizeLoudness;
+            EnableLimiter = settings.EnableLimiter;
+            MergeSegments = settings.MergeSegments;
+            MergeGapSeconds = settings.MergeGapSeconds;
+            MergedOutputFileName = string.IsNullOrWhiteSpace(settings.MergedOutputFileName)
+                ? "podcast_merged.m4a"
+                : settings.MergedOutputFileName;
+            IntroFadeSeconds = settings.IntroFadeSeconds;
+            OutroFadeSeconds = settings.OutroFadeSeconds;
+            PodcastTitle = settings.PodcastTitle ?? string.Empty;
+            PodcastArtist = settings.PodcastArtist ?? string.Empty;
+            PodcastAlbum = settings.PodcastAlbum ?? string.Empty;
+            VolumeGainDb = settings.VolumeGainDb;
+
+            SelectedOutputFormat = FfmpegAudioProcessor.OutputFormats.FirstOrDefault(format =>
+                    string.Equals(format.Extension, settings.OutputFormatExtension, StringComparison.OrdinalIgnoreCase))
+                ?? FfmpegAudioProcessor.OutputFormats[0];
+
+            OnPropertyChanged(nameof(CurrentFolderText));
+            OnPropertyChanged(nameof(OutputFolderText));
+            OnPropertyChanged(nameof(AiAudioFolderText));
+            OnPropertyChanged(nameof(FfmpegPathText));
+            OnPropertyChanged(nameof(IntroAudioText));
+            OnPropertyChanged(nameof(OutroAudioText));
+            OnPropertyChanged(nameof(CoverImageText));
+        }
+        catch (JsonException)
+        {
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            var settingsPath = GetSettingsPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
+
+            var settings = new AppSettings
+            {
+                CurrentFolder = _currentFolder,
+                OutputFolder = _outputFolder,
+                AiAudioFolder = _aiAudioFolder,
+                FfmpegPath = _ffmpegPath,
+                IntroAudioPath = _introAudioPath,
+                OutroAudioPath = _outroAudioPath,
+                CoverImagePath = _coverImagePath,
+                SilenceSeconds = SilenceSeconds,
+                SilenceThresholdDb = SilenceThresholdDb,
+                EnableDenoise = EnableDenoise,
+                UseAiProcessedAudio = UseAiProcessedAudio,
+                ReduceRoomTone = ReduceRoomTone,
+                EnhanceVoiceEq = EnhanceVoiceEq,
+                NormalizeLoudness = NormalizeLoudness,
+                EnableLimiter = EnableLimiter,
+                MergeSegments = MergeSegments,
+                MergeGapSeconds = MergeGapSeconds,
+                MergedOutputFileName = MergedOutputFileName,
+                IntroFadeSeconds = IntroFadeSeconds,
+                OutroFadeSeconds = OutroFadeSeconds,
+                PodcastTitle = PodcastTitle,
+                PodcastArtist = PodcastArtist,
+                PodcastAlbum = PodcastAlbum,
+                OutputFormatExtension = SelectedOutputFormat.Extension,
+                VolumeGainDb = VolumeGainDb
+            };
+
+            var json = JsonSerializer.Serialize(settings, SettingsJsonOptions);
+            File.WriteAllText(settingsPath, json);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static string GetSettingsPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "PodcastBatchCleaner",
+            "settings.json");
+    }
+
     private static void TryDeleteDirectory(string directory)
     {
         try
@@ -1251,5 +1388,58 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+
+    private sealed class AppSettings
+    {
+        public string? CurrentFolder { get; set; }
+
+        public string? OutputFolder { get; set; }
+
+        public string? AiAudioFolder { get; set; }
+
+        public string? FfmpegPath { get; set; }
+
+        public string? IntroAudioPath { get; set; }
+
+        public string? OutroAudioPath { get; set; }
+
+        public string? CoverImagePath { get; set; }
+
+        public double SilenceSeconds { get; set; } = 0.1;
+
+        public double SilenceThresholdDb { get; set; } = -35;
+
+        public bool EnableDenoise { get; set; } = true;
+
+        public bool UseAiProcessedAudio { get; set; }
+
+        public bool ReduceRoomTone { get; set; }
+
+        public bool EnhanceVoiceEq { get; set; }
+
+        public bool NormalizeLoudness { get; set; } = true;
+
+        public bool EnableLimiter { get; set; } = true;
+
+        public bool MergeSegments { get; set; }
+
+        public double MergeGapSeconds { get; set; } = 0.5;
+
+        public string MergedOutputFileName { get; set; } = "podcast_merged.m4a";
+
+        public double IntroFadeSeconds { get; set; } = 1;
+
+        public double OutroFadeSeconds { get; set; } = 1;
+
+        public string? PodcastTitle { get; set; }
+
+        public string? PodcastArtist { get; set; }
+
+        public string? PodcastAlbum { get; set; }
+
+        public string OutputFormatExtension { get; set; } = ".m4a";
+
+        public double VolumeGainDb { get; set; }
     }
 }
