@@ -726,6 +726,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : Path.Combine(_currentFolder, "processed");
 
         OnPropertyChanged(nameof(OutputFolderText));
+        var preflightErrors = ValidateProcessingInputs(items, ffmpegPath, _outputFolder);
+        if (preflightErrors.Count > 0)
+        {
+            ShowPreflightErrors(preflightErrors);
+            StatusText = "處理前檢查未通過。";
+            return;
+        }
+
         Directory.CreateDirectory(_outputFolder);
 
         _isProcessing = true;
@@ -1162,6 +1170,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return false;
         }
 
+        if (item.Duration is not null && trimEnd is not null && trimEnd > item.Duration)
+        {
+            error = "結束時間不能大於音檔長度。";
+            return false;
+        }
+
         return true;
     }
 
@@ -1225,6 +1239,91 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         return duration;
+    }
+
+    private List<string> ValidateProcessingInputs(
+        IReadOnlyList<AudioFileItem> items,
+        string ffmpegPath,
+        string outputFolder)
+    {
+        var errors = new List<string>();
+
+        if (!File.Exists(ffmpegPath))
+        {
+            errors.Add("找不到 FFmpeg，請重新指定 ffmpeg.exe。");
+        }
+
+        try
+        {
+            Directory.CreateDirectory(outputFolder);
+            var testFile = Path.Combine(outputFolder, $".write_test_{Guid.NewGuid():N}.tmp");
+            File.WriteAllText(testFile, string.Empty);
+            File.Delete(testFile);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            errors.Add($"輸出資料夾無法寫入：{ex.Message}");
+        }
+
+        if (UseAiProcessedAudio && (string.IsNullOrWhiteSpace(_aiAudioFolder) || !Directory.Exists(_aiAudioFolder)))
+        {
+            errors.Add("已勾選使用 AI 處理後音檔，但 AI 音檔資料夾不存在。");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_introAudioPath) && !File.Exists(_introAudioPath))
+        {
+            errors.Add("片頭音檔不存在，請重新選擇或清除片頭。");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_outroAudioPath) && !File.Exists(_outroAudioPath))
+        {
+            errors.Add("片尾音檔不存在，請重新選擇或清除片尾。");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_coverImagePath) && !File.Exists(_coverImagePath))
+        {
+            errors.Add("封面圖片不存在，請重新選擇或清除封面。");
+        }
+
+        foreach (var item in items)
+        {
+            if (!File.Exists(item.FilePath))
+            {
+                errors.Add($"{item.FileName}：找不到原始音檔。");
+                continue;
+            }
+
+            if (!TryGetTrimRange(item, out _, out _, out var trimError))
+            {
+                errors.Add($"{item.FileName}：{trimError}");
+            }
+        }
+
+        return errors;
+    }
+
+    private void ShowPreflightErrors(IReadOnlyList<string> errors)
+    {
+        var message = new StringBuilder()
+            .AppendLine("處理前檢查發現以下問題：")
+            .AppendLine();
+
+        foreach (var error in errors.Take(10))
+        {
+            message.AppendLine($"- {error}");
+        }
+
+        if (errors.Count > 10)
+        {
+            message.AppendLine($"...另有 {errors.Count - 10} 個問題");
+        }
+
+        System.Windows.MessageBox.Show(
+            this,
+            message.ToString(),
+            "處理前檢查",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
     }
 
     private void ShowProcessingSummary(ProcessingRunSummary summary)
