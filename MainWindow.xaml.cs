@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -624,6 +625,55 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "正在取消處理...";
     }
 
+    private void OpenOutputFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var folder = _outputFolder;
+        if (string.IsNullOrWhiteSpace(folder))
+        {
+            folder = _currentFolder is null
+                ? Path.Combine(AppContext.BaseDirectory, "processed")
+                : Path.Combine(_currentFolder, "processed");
+        }
+
+        if (!Directory.Exists(folder))
+        {
+            StatusText = "輸出資料夾還不存在。";
+            return;
+        }
+
+        OpenFolder(folder);
+    }
+
+    private void OpenSelectedFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var item = GetSelectedAudioFile();
+        if (item is null)
+        {
+            StatusText = "請先選取音檔。";
+            return;
+        }
+
+        OpenFileLocation(item.FilePath);
+    }
+
+    private void OpenProcessedFile_Click(object sender, RoutedEventArgs e)
+    {
+        var item = GetSelectedAudioFile();
+        if (item is null)
+        {
+            StatusText = "請先選取音檔。";
+            return;
+        }
+
+        if (!item.HasProcessedFile || item.ProcessedPath is null)
+        {
+            StatusText = "這個音檔還沒有處理後版本。";
+            return;
+        }
+
+        OpenFileLocation(item.ProcessedPath);
+    }
+
     private void MoveSelectedItem(int direction)
     {
         if (AudioList.SelectedItem is not AudioFileItem selected)
@@ -643,6 +693,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         AudioList.SelectedItem = selected;
         AudioList.ScrollIntoView(selected);
         StatusText = "已調整合併順序。";
+    }
+
+    private AudioFileItem? GetSelectedAudioFile()
+    {
+        return AudioList.SelectedItem as AudioFileItem ?? _selectedFile;
     }
 
     private async Task ProcessItemsAsync(IReadOnlyList<AudioFileItem> items)
@@ -1527,6 +1582,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         PositionSlider.Value = 0;
         PlaybackPositionText = "00:00";
         StatusText = "已停止。";
+    }
+
+    private void OpenFolder(string folder)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                ArgumentList = { folder },
+                UseShellExecute = true
+            });
+            StatusText = $"已開啟資料夾：{folder}";
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+        {
+            StatusText = $"無法開啟資料夾：{ex.Message}";
+        }
+    }
+
+    private void OpenFileLocation(string filePath)
+    {
+        if (!File.Exists(filePath))
+        {
+            StatusText = "找不到檔案。";
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                ArgumentList = { "/select,", filePath },
+                UseShellExecute = true
+            });
+            StatusText = $"已開啟檔案位置：{Path.GetFileName(filePath)}";
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+        {
+            StatusText = $"無法開啟檔案位置：{ex.Message}";
+        }
     }
 
     private static string FormatTime(TimeSpan value)

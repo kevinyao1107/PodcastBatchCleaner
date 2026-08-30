@@ -180,6 +180,7 @@
                 <StackPanel Orientation="Horizontal">
                     <Button Click="SelectFolder_Click" Content="選取資料夾" />
                     <Button Click="ChooseOutputFolder_Click" Content="輸出位置" />
+                    <Button Click="OpenOutputFolder_Click" Content="開啟輸出" />
                     <Button Click="ChooseAiAudioFolder_Click" Content="AI 音檔資料夾" />
                     <Button Click="ChooseFfmpeg_Click" Content="指定 FFmpeg" />
                 </StackPanel>
@@ -202,6 +203,7 @@
                             Background="{StaticResource AccentBrush}"
                             BorderBrush="{StaticResource AccentBrush}"
                             Foreground="#07100E" />
+                    <Button Click="OpenProcessedFile_Click" Content="開處理後檔" />
                     <Button Click="CancelProcessing_Click" Content="取消" />
                 </StackPanel>
             </Grid>
@@ -277,6 +279,7 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock VerticalAlignment="Center"
                                        FontSize="16"
@@ -292,7 +295,12 @@
                                     Padding="10,4"
                                     Click="MoveSelectedDown_Click"
                                     Content="下移" />
-                            <TextBlock Grid.Column="3"
+                            <Button Grid.Column="3"
+                                    MinHeight="28"
+                                    Padding="10,4"
+                                    Click="OpenSelectedFolder_Click"
+                                    Content="開原檔位置" />
+                            <TextBlock Grid.Column="4"
                                        VerticalAlignment="Center"
                                        Foreground="{StaticResource MutedTextBrush}"
                                        Text="{Binding FileCountText}" />
