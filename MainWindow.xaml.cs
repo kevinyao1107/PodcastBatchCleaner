@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -678,6 +679,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ProcessingProgress = 0;
         ProcessingProgressText = "0%";
         CurrentProcessingFileText = string.Empty;
+        var summary = new ProcessingRunSummary(items.Count, _outputFolder, MergeSegments);
+        var showSummary = false;
 
         var options = new AudioProcessingOptions(
             SilenceSeconds,
@@ -701,8 +704,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             if (MergeSegments)
             {
-                await ProcessMergedItemsAsync(ffmpegPath, items, options, progressWindow);
+                var mergedOutputPath = await ProcessMergedItemsAsync(ffmpegPath, items, options, progressWindow);
+                summary.SuccessCount = items.Count;
+                summary.OutputPath = mergedOutputPath;
                 StatusText = "統整輸出完成。";
+                showSummary = true;
                 return;
             }
 
@@ -713,79 +719,101 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 var item = items[index];
                 _processingCancellation.Token.ThrowIfCancellationRequested();
 
-                item.IsProcessing = true;
-                item.Status = $"處理中 {index + 1}/{total}";
-                StatusText = $"處理中：{item.FileName}";
-
-                CurrentProcessingFileText = item.FileName;
-                progressWindow.SetProgress(item.FileName, ProcessingProgress);
-
-                var processingInputPath = GetProcessingInputPath(item);
-                if (!string.Equals(processingInputPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    item.Status = "使用 AI 檔";
-                    StatusText = $"使用 AI 音檔：{item.FileName}";
-                }
-                else if (UseAiProcessedAudio)
-                {
-                    item.Status = "未找到 AI 檔";
-                    StatusText = $"找不到 AI 音檔，使用原檔：{item.FileName}";
-                }
+                    item.IsProcessing = true;
+                    item.Status = $"處理中 {index + 1}/{total}";
+                    StatusText = $"處理中：{item.FileName}";
 
-                var outputPath = FfmpegAudioProcessor.MakeOutputPath(
-                    item.FilePath,
-                    options.OutputFolder,
-                    item.CustomOutputFileName,
-                    SelectedOutputFormat.Extension);
-                if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
-                {
-                    item.Status = "剪輯時間錯誤";
-                    throw new InvalidOperationException($"{item.FileName}：{trimError}");
-                }
+                    CurrentProcessingFileText = item.FileName;
+                    progressWindow.SetProgress(item.FileName, ProcessingProgress);
 
-                if (item.Duration is null)
-                {
-                    item.Duration = await _processor.ProbeDurationAsync(
+                    var processingInputPath = GetProcessingInputPath(item);
+                    if (!string.Equals(processingInputPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        item.Status = "使用 AI 檔";
+                        StatusText = $"使用 AI 音檔：{item.FileName}";
+                    }
+                    else if (UseAiProcessedAudio)
+                    {
+                        item.Status = "未找到 AI 檔";
+                        StatusText = $"找不到 AI 音檔，使用原檔：{item.FileName}";
+                    }
+
+                    var outputPath = FfmpegAudioProcessor.MakeOutputPath(
+                        item.FilePath,
+                        options.OutputFolder,
+                        item.CustomOutputFileName,
+                        SelectedOutputFormat.Extension);
+                    if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+                    {
+                        item.Status = "剪輯時間錯誤";
+                        throw new InvalidOperationException(trimError);
+                    }
+
+                    if (item.Duration is null)
+                    {
+                        item.Duration = await _processor.ProbeDurationAsync(
+                            ffmpegPath,
+                            processingInputPath,
+                            _processingCancellation.Token);
+                    }
+
+                    var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
+                    var progress = new Progress<AudioProcessingProgress>(current =>
+                    {
+                        var overallPercent = Math.Clamp(((itemIndex + current.Percent) / total) * 100, 0, 100);
+                        ProcessingProgress = overallPercent;
+                        ProcessingProgressText = $"{overallPercent:0}%";
+                        progressWindow.SetProgress(item.FileName, overallPercent);
+                        item.Status = $"{overallPercent:0}%";
+                        StatusText = $"處理中：{item.FileName}";
+                    });
+
+                    await _processor.ProcessAsync(
                         ffmpegPath,
                         processingInputPath,
-                        _processingCancellation.Token);
+                        outputPath,
+                        options,
+                        effectiveDuration,
+                        progress,
+                        cancellationToken: _processingCancellation.Token,
+                        audioCodec: SelectedOutputFormat.AudioCodec,
+                        trimStart: trimStart,
+                        trimEnd: trimEnd);
+
+                    item.ProcessedPath = outputPath;
+                    item.Status = "完成";
+                    item.IsProcessing = false;
+                    summary.SuccessCount++;
+                    summary.OutputPath ??= outputPath;
                 }
-
-                var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
-                var progress = new Progress<AudioProcessingProgress>(current =>
+                catch (OperationCanceledException)
                 {
-                    var overallPercent = Math.Clamp(((itemIndex + current.Percent) / total) * 100, 0, 100);
-                    ProcessingProgress = overallPercent;
-                    ProcessingProgressText = $"{overallPercent:0}%";
-                    progressWindow.SetProgress(item.FileName, overallPercent);
-                    item.Status = $"{overallPercent:0}%";
-                    StatusText = $"處理中：{item.FileName}";
-                });
-
-                await _processor.ProcessAsync(
-                    ffmpegPath,
-                    processingInputPath,
-                    outputPath,
-                    options,
-                    effectiveDuration,
-                    progress,
-                    cancellationToken: _processingCancellation.Token,
-                    audioCodec: SelectedOutputFormat.AudioCodec,
-                    trimStart: trimStart,
-                    trimEnd: trimEnd);
-
-                item.ProcessedPath = outputPath;
-                item.Status = "完成";
-                item.IsProcessing = false;
-                ProcessingProgress = Math.Clamp(((itemIndex + 1d) / total) * 100, 0, 100);
-                ProcessingProgressText = $"{ProcessingProgress:0}%";
-                progressWindow.SetProgress(item.FileName, ProcessingProgress);
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    item.IsProcessing = false;
+                    item.Status = "失敗";
+                    summary.Failures.Add(new ProcessingFailure(item.FileName, ex.Message));
+                }
+                finally
+                {
+                    ProcessingProgress = Math.Clamp(((itemIndex + 1d) / total) * 100, 0, 100);
+                    ProcessingProgressText = $"{ProcessingProgress:0}%";
+                    progressWindow.SetProgress(item.FileName, ProcessingProgress);
+                }
             }
 
-            StatusText = "處理完成。";
+            StatusText = summary.Failures.Count == 0
+                ? "處理完成。"
+                : $"處理完成，{summary.Failures.Count} 個檔案失敗。";
+            showSummary = true;
         }
         catch (OperationCanceledException)
         {
+            summary.WasCanceled = true;
             foreach (var item in items.Where(item => item.IsProcessing))
             {
                 item.IsProcessing = false;
@@ -793,6 +821,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
 
             StatusText = "處理已取消。";
+            showSummary = true;
         }
         catch (Exception ex)
         {
@@ -802,7 +831,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 item.Status = "失敗";
             }
 
+            if (summary.Failures.Count == 0)
+            {
+                summary.Failures.Add(new ProcessingFailure(MergeSegments ? "統整輸出" : "批次處理", ex.Message));
+            }
+
             StatusText = $"處理失敗：{ex.Message}";
+            showSummary = true;
         }
         finally
         {
@@ -812,10 +847,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             CurrentProcessingFileText = string.Empty;
             IsProgressVisible = false;
             progressWindow.Close();
+
+            if (showSummary)
+            {
+                ShowProcessingSummary(summary);
+            }
         }
     }
 
-    private async Task ProcessMergedItemsAsync(
+    private async Task<string> ProcessMergedItemsAsync(
         string ffmpegPath,
         IReadOnlyList<AudioFileItem> items,
         AudioProcessingOptions options,
@@ -1000,6 +1040,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ProcessingProgress = 100;
             ProcessingProgressText = "100%";
             progressWindow.SetProgress(Path.GetFileName(mergedOutputPath), 100);
+            return mergedOutputPath;
         }
         finally
         {
@@ -1129,6 +1170,50 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         return duration;
+    }
+
+    private void ShowProcessingSummary(ProcessingRunSummary summary)
+    {
+        var failedCount = summary.Failures.Count;
+        var canceledCount = summary.WasCanceled
+            ? Math.Max(summary.TotalCount - summary.SuccessCount - failedCount, 0)
+            : 0;
+
+        var message = new StringBuilder()
+            .AppendLine(summary.WasCanceled ? "處理已取消。" : "處理完成。")
+            .AppendLine()
+            .AppendLine($"成功：{summary.SuccessCount}")
+            .AppendLine($"失敗：{failedCount}")
+            .AppendLine($"取消：{canceledCount}")
+            .AppendLine($"輸出資料夾：{summary.OutputFolder}");
+
+        if (!string.IsNullOrWhiteSpace(summary.OutputPath))
+        {
+            message.AppendLine($"最後輸出：{summary.OutputPath}");
+        }
+
+        if (failedCount > 0)
+        {
+            message.AppendLine();
+            message.AppendLine("失敗檔案：");
+            foreach (var failure in summary.Failures.Take(8))
+            {
+                message.AppendLine($"- {failure.FileName}: {failure.ErrorMessage}");
+            }
+
+            if (failedCount > 8)
+            {
+                message.AppendLine($"...另有 {failedCount - 8} 個失敗檔案");
+            }
+        }
+
+        var icon = failedCount > 0
+            ? MessageBoxImage.Warning
+            : summary.WasCanceled
+                ? MessageBoxImage.Information
+                : MessageBoxImage.Information;
+
+        System.Windows.MessageBox.Show(this, message.ToString(), "處理摘要", MessageBoxButton.OK, icon);
     }
 
     private void AudioList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1467,6 +1552,25 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+
+    private sealed class ProcessingRunSummary(int totalCount, string outputFolder, bool isMergedOutput)
+    {
+        public int TotalCount { get; } = totalCount;
+
+        public string OutputFolder { get; } = outputFolder;
+
+        public bool IsMergedOutput { get; } = isMergedOutput;
+
+        public int SuccessCount { get; set; }
+
+        public string? OutputPath { get; set; }
+
+        public bool WasCanceled { get; set; }
+
+        public List<ProcessingFailure> Failures { get; } = [];
+    }
+
+    private sealed record ProcessingFailure(string FileName, string ErrorMessage);
 
     private sealed class AppSettings
     {
