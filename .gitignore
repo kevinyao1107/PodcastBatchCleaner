@@ -11,6 +11,10 @@ obj/
 **/.solution_build_*/
 .cross_build_*/
 **/.cross_build_*/
+.publish_obj/
+**/.publish_obj/
+release/
+**/release/
 .merge_stage_*/
 **/.merge_stage_*/
 .merge_temp_*/
