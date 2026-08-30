@@ -11,6 +11,8 @@ public sealed class AudioFileItem : INotifyPropertyChanged
     private TimeSpan? _duration;
     private bool _isProcessing;
     private string _customOutputFileName = string.Empty;
+    private string _trimStartText = string.Empty;
+    private string _trimEndText = string.Empty;
 
     public required string FilePath { get; init; }
 
@@ -53,6 +55,18 @@ public sealed class AudioFileItem : INotifyPropertyChanged
     {
         get => _customOutputFileName;
         set => SetField(ref _customOutputFileName, value);
+    }
+
+    public string TrimStartText
+    {
+        get => _trimStartText;
+        set => SetField(ref _trimStartText, value);
+    }
+
+    public string TrimEndText
+    {
+        get => _trimEndText;
+        set => SetField(ref _trimEndText, value);
     }
 
     public bool IsProcessing

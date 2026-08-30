@@ -61,6 +61,7 @@
                 <StackPanel Orientation="Horizontal">
                     <Button Content="選取資料夾" Click="SelectFolder_Click" />
                     <Button Content="輸出位置" Click="ChooseOutputFolder_Click" />
+                    <Button Content="AI 音檔資料夾" Click="ChooseAiAudioFolder_Click" />
                     <Button Content="指定 FFmpeg" Click="ChooseFfmpeg_Click" />
                 </StackPanel>
 
@@ -149,8 +150,12 @@
                             <TextBox Grid.Column="1" Margin="8,0,0,0" Text="{Binding SilenceThresholdDb}" />
                         </Grid>
 
-                        <CheckBox Margin="0,16,0,0" Content="統一降噪" IsChecked="{Binding EnableDenoise}" />
+                        <CheckBox Margin="0,16,0,0" Content="使用 AI 處理後音檔" IsChecked="{Binding UseAiProcessedAudio}" />
+                        <CheckBox Margin="0,10,0,0" Content="統一降噪" IsChecked="{Binding EnableDenoise}" />
                         <CheckBox Margin="0,10,0,0" Content="減少空間音" IsChecked="{Binding ReduceRoomTone}" />
+                        <CheckBox Margin="0,10,0,0" Content="人聲增厚 EQ" IsChecked="{Binding EnhanceVoiceEq}" />
+                        <CheckBox Margin="0,10,0,0" Content="Podcast 響度標準化 (-16 LUFS)" IsChecked="{Binding NormalizeLoudness}" />
+                        <CheckBox Margin="0,10,0,0" Content="防爆音 Limiter" IsChecked="{Binding EnableLimiter}" />
 
                         <TextBlock Margin="0,18,0,6" Text="音量增益 dB" Classes="muted" />
                         <Grid ColumnDefinitions="*,62">
@@ -193,6 +198,7 @@
                         <TextBlock FontSize="16" FontWeight="SemiBold" Text="工具狀態" />
                         <TextBlock Margin="0,10,0,0" Text="{Binding FfmpegPathText}" TextWrapping="Wrap" Classes="muted" />
                         <TextBlock Margin="0,10,0,0" Text="{Binding OutputFolderText}" TextWrapping="Wrap" Classes="muted" />
+                        <TextBlock Margin="0,10,0,0" Text="{Binding AiAudioFolderText}" TextWrapping="Wrap" Classes="muted" />
                     </StackPanel>
                 </ScrollViewer>
             </Border>

@@ -24,13 +24,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private AudioFileItem? _selectedFile;
     private string? _currentFolder;
     private string? _outputFolder;
+    private string? _aiAudioFolder;
     private string? _ffmpegPath;
     private bool _isDraggingPosition;
     private bool _isProcessing;
     private double _silenceSeconds = 0.1;
     private double _silenceThresholdDb = -35;
     private bool _enableDenoise = true;
+    private bool _useAiProcessedAudio;
     private bool _reduceRoomTone;
+    private bool _enhanceVoiceEq;
+    private bool _normalizeLoudness = true;
+    private bool _enableLimiter = true;
+    private bool _mergeSegments;
+    private double _mergeGapSeconds = 0.5;
+    private string _mergedOutputFileName = "podcast_merged.m4a";
+    private string? _introAudioPath;
+    private string? _outroAudioPath;
+    private string? _coverImagePath;
+    private double _introFadeSeconds = 1;
+    private double _outroFadeSeconds = 1;
+    private string _podcastTitle = string.Empty;
+    private string _podcastArtist = string.Empty;
+    private string _podcastAlbum = string.Empty;
+    private AudioOutputFormat _selectedOutputFormat = FfmpegAudioProcessor.OutputFormats[0];
     private double _volumeGainDb;
     private int _playbackSourceIndex;
     private string _currentProcessingFileText = string.Empty;
@@ -59,6 +76,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public ObservableCollection<AudioFileItem> AudioFiles { get; } = [];
 
+    public IReadOnlyList<AudioOutputFormat> OutputFormats => FfmpegAudioProcessor.OutputFormats;
+
     public string CurrentFolderText => _currentFolder is null
         ? "尚未選取資料夾"
         : $"目前資料夾：{_currentFolder}";
@@ -66,6 +85,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string OutputFolderText => _outputFolder is null
         ? "輸出資料夾：尚未設定，預設會建立在來源資料夾下的 processed"
         : $"輸出資料夾：{_outputFolder}";
+
+    public string AiAudioFolderText => _aiAudioFolder is null
+        ? "AI 音檔資料夾：尚未設定"
+        : $"AI 音檔資料夾：{_aiAudioFolder}";
 
     public string FfmpegPathText => _ffmpegPath is null
         ? "FFmpeg：尚未找到，請指定 ffmpeg.exe 後再輸出"
@@ -76,6 +99,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string SelectedFileText => _selectedFile is null
         ? "尚未選取音檔"
         : $"目前選取：{_selectedFile.FileName}";
+
+    public string IntroAudioText => _introAudioPath is null
+        ? "片頭音檔：未設定"
+        : $"片頭音檔：{Path.GetFileName(_introAudioPath)}";
+
+    public string OutroAudioText => _outroAudioPath is null
+        ? "片尾音檔：未設定"
+        : $"片尾音檔：{Path.GetFileName(_outroAudioPath)}";
+
+    public string CoverImageText => _coverImagePath is null
+        ? "封面圖片：未設定"
+        : $"封面圖片：{Path.GetFileName(_coverImagePath)}";
 
     public string StatusText
     {
@@ -137,10 +172,88 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         set => SetField(ref _enableDenoise, value);
     }
 
+    public bool UseAiProcessedAudio
+    {
+        get => _useAiProcessedAudio;
+        set => SetField(ref _useAiProcessedAudio, value);
+    }
+
     public bool ReduceRoomTone
     {
         get => _reduceRoomTone;
         set => SetField(ref _reduceRoomTone, value);
+    }
+
+    public bool EnhanceVoiceEq
+    {
+        get => _enhanceVoiceEq;
+        set => SetField(ref _enhanceVoiceEq, value);
+    }
+
+    public bool NormalizeLoudness
+    {
+        get => _normalizeLoudness;
+        set => SetField(ref _normalizeLoudness, value);
+    }
+
+    public bool EnableLimiter
+    {
+        get => _enableLimiter;
+        set => SetField(ref _enableLimiter, value);
+    }
+
+    public bool MergeSegments
+    {
+        get => _mergeSegments;
+        set => SetField(ref _mergeSegments, value);
+    }
+
+    public double MergeGapSeconds
+    {
+        get => _mergeGapSeconds;
+        set => SetField(ref _mergeGapSeconds, Math.Clamp(Math.Round(value, 1), 0, 10));
+    }
+
+    public string MergedOutputFileName
+    {
+        get => _mergedOutputFileName;
+        set => SetField(ref _mergedOutputFileName, value);
+    }
+
+    public double IntroFadeSeconds
+    {
+        get => _introFadeSeconds;
+        set => SetField(ref _introFadeSeconds, Math.Clamp(Math.Round(value, 1), 0, 10));
+    }
+
+    public double OutroFadeSeconds
+    {
+        get => _outroFadeSeconds;
+        set => SetField(ref _outroFadeSeconds, Math.Clamp(Math.Round(value, 1), 0, 10));
+    }
+
+    public string PodcastTitle
+    {
+        get => _podcastTitle;
+        set => SetField(ref _podcastTitle, value);
+    }
+
+    public string PodcastArtist
+    {
+        get => _podcastArtist;
+        set => SetField(ref _podcastArtist, value);
+    }
+
+    public string PodcastAlbum
+    {
+        get => _podcastAlbum;
+        set => SetField(ref _podcastAlbum, value);
+    }
+
+    public AudioOutputFormat SelectedOutputFormat
+    {
+        get => _selectedOutputFormat;
+        set => SetField(ref _selectedOutputFormat, value);
     }
 
     public double VolumeGainDb
@@ -216,6 +329,107 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _outputFolder = dialog.SelectedPath;
         OnPropertyChanged(nameof(OutputFolderText));
         StatusText = "已設定輸出資料夾。";
+    }
+
+    private void ChooseAiAudioFolder_Click(object sender, RoutedEventArgs e)
+    {
+        using var dialog = new Forms.FolderBrowserDialog
+        {
+            Description = "選取 AI 處理後音檔資料夾",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = false,
+            SelectedPath = _aiAudioFolder ?? _currentFolder ?? string.Empty
+        };
+
+        if (dialog.ShowDialog() != Forms.DialogResult.OK)
+        {
+            return;
+        }
+
+        _aiAudioFolder = dialog.SelectedPath;
+        UseAiProcessedAudio = true;
+        OnPropertyChanged(nameof(AiAudioFolderText));
+        StatusText = "已設定 AI 音檔資料夾。";
+    }
+
+    private void ChooseIntroAudio_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedPath = ChooseAudioFile("選取片頭音檔");
+
+        if (selectedPath is null)
+        {
+            return;
+        }
+
+        _introAudioPath = selectedPath;
+        OnPropertyChanged(nameof(IntroAudioText));
+        StatusText = "已設定片頭音檔。";
+    }
+
+    private void ChooseOutroAudio_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedPath = ChooseAudioFile("選取片尾音檔");
+
+        if (selectedPath is null)
+        {
+            return;
+        }
+
+        _outroAudioPath = selectedPath;
+        OnPropertyChanged(nameof(OutroAudioText));
+        StatusText = "已設定片尾音檔。";
+    }
+
+    private void ClearIntroAudio_Click(object sender, RoutedEventArgs e)
+    {
+        _introAudioPath = null;
+        OnPropertyChanged(nameof(IntroAudioText));
+        StatusText = "已清除片頭音檔。";
+    }
+
+    private void ClearOutroAudio_Click(object sender, RoutedEventArgs e)
+    {
+        _outroAudioPath = null;
+        OnPropertyChanged(nameof(OutroAudioText));
+        StatusText = "已清除片尾音檔。";
+    }
+
+    private void ChooseCoverImage_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "選取封面圖片",
+            Filter = "圖片|*.jpg;*.jpeg;*.png;*.webp;*.bmp|所有檔案|*.*",
+            InitialDirectory = _currentFolder ?? Environment.GetFolderPath(Environment.SpecialFolder.MyPictures)
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        _coverImagePath = dialog.FileName;
+        OnPropertyChanged(nameof(CoverImageText));
+        StatusText = "已設定封面圖片。";
+    }
+
+    private void ClearCoverImage_Click(object sender, RoutedEventArgs e)
+    {
+        _coverImagePath = null;
+        OnPropertyChanged(nameof(CoverImageText));
+        StatusText = "已清除封面圖片。";
+    }
+
+    private string? ChooseAudioFile(string title)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = title,
+            Filter = "音檔|*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;*.wma;*.mp4|所有檔案|*.*",
+            InitialDirectory = _currentFolder ?? Environment.GetFolderPath(Environment.SpecialFolder.MyMusic)
+        };
+
+        return dialog.ShowDialog(this) == true ? dialog.FileName : null;
     }
 
     private void ChooseFfmpeg_Click(object sender, RoutedEventArgs e)
@@ -301,10 +515,41 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await ProcessItemsAsync(AudioFiles.ToList());
     }
 
+    private void MoveSelectedUp_Click(object sender, RoutedEventArgs e)
+    {
+        MoveSelectedItem(-1);
+    }
+
+    private void MoveSelectedDown_Click(object sender, RoutedEventArgs e)
+    {
+        MoveSelectedItem(1);
+    }
+
     private void CancelProcessing_Click(object sender, RoutedEventArgs e)
     {
         _processingCancellation?.Cancel();
         StatusText = "正在取消處理...";
+    }
+
+    private void MoveSelectedItem(int direction)
+    {
+        if (AudioList.SelectedItem is not AudioFileItem selected)
+        {
+            StatusText = "請先選取要移動的音檔。";
+            return;
+        }
+
+        var currentIndex = AudioFiles.IndexOf(selected);
+        var nextIndex = currentIndex + direction;
+        if (currentIndex < 0 || nextIndex < 0 || nextIndex >= AudioFiles.Count)
+        {
+            return;
+        }
+
+        AudioFiles.Move(currentIndex, nextIndex);
+        AudioList.SelectedItem = selected;
+        AudioList.ScrollIntoView(selected);
+        StatusText = "已調整合併順序。";
     }
 
     private async Task ProcessItemsAsync(IReadOnlyList<AudioFileItem> items)
@@ -347,6 +592,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SilenceThresholdDb,
             EnableDenoise,
             ReduceRoomTone,
+            EnhanceVoiceEq,
+            NormalizeLoudness,
+            EnableLimiter,
             VolumeGainDb,
             _outputFolder);
 
@@ -359,6 +607,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         try
         {
+            if (MergeSegments)
+            {
+                await ProcessMergedItemsAsync(ffmpegPath, items, options, progressWindow);
+                StatusText = "統整輸出完成。";
+                return;
+            }
+
             var total = items.Count;
             for (var index = 0; index < total; index++)
             {
@@ -373,18 +628,38 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 CurrentProcessingFileText = item.FileName;
                 progressWindow.SetProgress(item.FileName, ProcessingProgress);
 
+                var processingInputPath = GetProcessingInputPath(item);
+                if (!string.Equals(processingInputPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    item.Status = "使用 AI 檔";
+                    StatusText = $"使用 AI 音檔：{item.FileName}";
+                }
+                else if (UseAiProcessedAudio)
+                {
+                    item.Status = "未找到 AI 檔";
+                    StatusText = $"找不到 AI 音檔，使用原檔：{item.FileName}";
+                }
+
                 var outputPath = FfmpegAudioProcessor.MakeOutputPath(
                     item.FilePath,
                     options.OutputFolder,
-                    item.CustomOutputFileName);
+                    item.CustomOutputFileName,
+                    SelectedOutputFormat.Extension);
+                if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+                {
+                    item.Status = "剪輯時間錯誤";
+                    throw new InvalidOperationException($"{item.FileName}：{trimError}");
+                }
+
                 if (item.Duration is null)
                 {
                     item.Duration = await _processor.ProbeDurationAsync(
                         ffmpegPath,
-                        item.FilePath,
+                        processingInputPath,
                         _processingCancellation.Token);
                 }
 
+                var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
                 var progress = new Progress<AudioProcessingProgress>(current =>
                 {
                     var overallPercent = Math.Clamp(((itemIndex + current.Percent) / total) * 100, 0, 100);
@@ -397,12 +672,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                 await _processor.ProcessAsync(
                     ffmpegPath,
-                    item.FilePath,
+                    processingInputPath,
                     outputPath,
                     options,
-                    item.Duration,
+                    effectiveDuration,
                     progress,
-                    cancellationToken: _processingCancellation.Token);
+                    cancellationToken: _processingCancellation.Token,
+                    audioCodec: SelectedOutputFormat.AudioCodec,
+                    trimStart: trimStart,
+                    trimEnd: trimEnd);
 
                 item.ProcessedPath = outputPath;
                 item.Status = "完成";
@@ -445,11 +723,355 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    private async Task ProcessMergedItemsAsync(
+        string ffmpegPath,
+        IReadOnlyList<AudioFileItem> items,
+        AudioProcessingOptions options,
+        ProcessingProgressWindow progressWindow)
+    {
+        var tempDirectory = Path.Combine(options.OutputFolder, $".merge_stage_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDirectory);
+        var segmentPaths = new List<string>();
+        var hasIntro = !string.IsNullOrWhiteSpace(_introAudioPath) && File.Exists(_introAudioPath);
+        var hasOutro = !string.IsNullOrWhiteSpace(_outroAudioPath) && File.Exists(_outroAudioPath);
+        var totalSteps = items.Count + 1d + (hasIntro ? 1 : 0) + (hasOutro ? 1 : 0);
+        var completedSteps = 0d;
+
+        try
+        {
+            if (hasIntro)
+            {
+                _processingCancellation?.Token.ThrowIfCancellationRequested();
+
+                var introFileName = Path.GetFileName(_introAudioPath!);
+                CurrentProcessingFileText = introFileName;
+                StatusText = $"準備片頭：{introFileName}";
+                progressWindow.SetProgress(introFileName, ProcessingProgress);
+
+                var introDuration = await _processor.ProbeDurationAsync(
+                    ffmpegPath,
+                    _introAudioPath!,
+                    _processingCancellation?.Token ?? CancellationToken.None);
+                var introPath = Path.Combine(tempDirectory, "0000_intro.wav");
+                var introProgress = new Progress<AudioProcessingProgress>(current =>
+                    UpdateMergeStepProgress(introFileName, completedSteps, current.Percent, totalSteps, progressWindow));
+
+                await _processor.PrepareClipForMergeAsync(
+                    ffmpegPath,
+                    _introAudioPath!,
+                    introPath,
+                    IntroFadeSeconds,
+                    0,
+                    introDuration,
+                    introProgress,
+                    _processingCancellation?.Token ?? CancellationToken.None);
+
+                segmentPaths.Add(introPath);
+                completedSteps++;
+                SetOverallMergeProgress(completedSteps, totalSteps);
+            }
+
+            for (var index = 0; index < items.Count; index++)
+            {
+                var item = items[index];
+                _processingCancellation?.Token.ThrowIfCancellationRequested();
+
+                item.IsProcessing = true;
+                item.Status = $"統整處理 {index + 1}/{items.Count}";
+                CurrentProcessingFileText = item.FileName;
+                StatusText = $"統整處理：{item.FileName}";
+                progressWindow.SetProgress(item.FileName, ProcessingProgress);
+
+                var processingInputPath = GetProcessingInputPath(item);
+                if (!string.Equals(processingInputPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    item.Status = "使用 AI 檔";
+                    StatusText = $"使用 AI 音檔：{item.FileName}";
+                }
+                else if (UseAiProcessedAudio)
+                {
+                    item.Status = "未找到 AI 檔";
+                    StatusText = $"找不到 AI 音檔，使用原檔：{item.FileName}";
+                }
+
+                var duration = await _processor.ProbeDurationAsync(
+                    ffmpegPath,
+                    processingInputPath,
+                    _processingCancellation?.Token ?? CancellationToken.None);
+                item.Duration ??= duration;
+
+                if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+                {
+                    item.Status = "剪輯時間錯誤";
+                    throw new InvalidOperationException($"{item.FileName}：{trimError}");
+                }
+
+                var segmentPath = Path.Combine(tempDirectory, $"{index + 1:0000}.wav");
+                var stepStart = completedSteps;
+                var effectiveDuration = GetEffectiveDuration(duration, trimStart, trimEnd);
+                var progress = new Progress<AudioProcessingProgress>(current =>
+                {
+                    UpdateMergeStepProgress(item.FileName, stepStart, current.Percent, totalSteps, progressWindow);
+                    item.Status = $"{ProcessingProgress:0}%";
+                });
+
+                await _processor.ProcessAsync(
+                    ffmpegPath,
+                    processingInputPath,
+                    segmentPath,
+                    options,
+                    effectiveDuration,
+                    progress,
+                    _processingCancellation?.Token ?? CancellationToken.None,
+                    audioCodec: "pcm_s16le",
+                    sampleRate: 44100,
+                    channels: 2,
+                    trimStart: trimStart,
+                    trimEnd: trimEnd);
+
+                segmentPaths.Add(segmentPath);
+                item.Status = "已加入統整";
+                item.IsProcessing = false;
+                completedSteps++;
+                SetOverallMergeProgress(completedSteps, totalSteps);
+            }
+
+            if (hasOutro)
+            {
+                _processingCancellation?.Token.ThrowIfCancellationRequested();
+
+                var outroFileName = Path.GetFileName(_outroAudioPath!);
+                CurrentProcessingFileText = outroFileName;
+                StatusText = $"準備片尾：{outroFileName}";
+                progressWindow.SetProgress(outroFileName, ProcessingProgress);
+
+                var outroDuration = await _processor.ProbeDurationAsync(
+                    ffmpegPath,
+                    _outroAudioPath!,
+                    _processingCancellation?.Token ?? CancellationToken.None);
+                var outroPath = Path.Combine(tempDirectory, "9999_outro.wav");
+                var outroStepStart = completedSteps;
+                var outroProgress = new Progress<AudioProcessingProgress>(current =>
+                    UpdateMergeStepProgress(outroFileName, outroStepStart, current.Percent, totalSteps, progressWindow));
+
+                await _processor.PrepareClipForMergeAsync(
+                    ffmpegPath,
+                    _outroAudioPath!,
+                    outroPath,
+                    0,
+                    OutroFadeSeconds,
+                    outroDuration,
+                    outroProgress,
+                    _processingCancellation?.Token ?? CancellationToken.None);
+
+                segmentPaths.Add(outroPath);
+                completedSteps++;
+                SetOverallMergeProgress(completedSteps, totalSteps);
+            }
+
+            var mergedOutputPath = FfmpegAudioProcessor.MakeMergedOutputPath(
+                options.OutputFolder,
+                MergedOutputFileName,
+                SelectedOutputFormat.Extension);
+            var mergeProgress = new Progress<AudioProcessingProgress>(current =>
+            {
+                UpdateMergeStepProgress(
+                    Path.GetFileName(mergedOutputPath),
+                    completedSteps,
+                    current.Percent,
+                    totalSteps,
+                    progressWindow);
+                StatusText = $"合併輸出：{Path.GetFileName(mergedOutputPath)}";
+            });
+
+            await _processor.MergeAsync(
+                ffmpegPath,
+                segmentPaths,
+                mergedOutputPath,
+                MergeGapSeconds,
+                mergeProgress,
+                _processingCancellation?.Token ?? CancellationToken.None,
+                new AudioMetadataOptions(
+                    PodcastTitle,
+                    PodcastArtist,
+                    PodcastAlbum,
+                    _coverImagePath),
+                SelectedOutputFormat);
+
+            foreach (var item in items)
+            {
+                item.ProcessedPath = mergedOutputPath;
+                item.Status = "已統整";
+                item.IsProcessing = false;
+            }
+
+            ProcessingProgress = 100;
+            ProcessingProgressText = "100%";
+            progressWindow.SetProgress(Path.GetFileName(mergedOutputPath), 100);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempDirectory);
+        }
+    }
+
+    private void UpdateMergeStepProgress(
+        string displayName,
+        double completedSteps,
+        double stepPercent,
+        double totalSteps,
+        ProcessingProgressWindow progressWindow)
+    {
+        var overallPercent = Math.Clamp(((completedSteps + stepPercent) / totalSteps) * 100, 0, 100);
+        ProcessingProgress = overallPercent;
+        ProcessingProgressText = $"{overallPercent:0}%";
+        progressWindow.SetProgress(displayName, overallPercent);
+    }
+
+    private void SetOverallMergeProgress(double completedSteps, double totalSteps)
+    {
+        ProcessingProgress = Math.Clamp((completedSteps / totalSteps) * 100, 0, 100);
+        ProcessingProgressText = $"{ProcessingProgress:0}%";
+    }
+
+    private static bool TryGetTrimRange(
+        AudioFileItem item,
+        out TimeSpan? trimStart,
+        out TimeSpan? trimEnd,
+        out string? error)
+    {
+        trimStart = null;
+        trimEnd = null;
+        error = null;
+
+        if (!TryParseOptionalTime(item.TrimStartText, out trimStart))
+        {
+            error = "開始時間格式不正確，請輸入秒數或 mm:ss。";
+            return false;
+        }
+
+        if (!TryParseOptionalTime(item.TrimEndText, out trimEnd))
+        {
+            error = "結束時間格式不正確，請輸入秒數或 mm:ss。";
+            return false;
+        }
+
+        if (trimStart is { TotalSeconds: < 0 } || trimEnd is { TotalSeconds: < 0 })
+        {
+            error = "剪輯時間不能小於 0。";
+            return false;
+        }
+
+        if (trimStart is not null && trimEnd is not null && trimEnd <= trimStart)
+        {
+            error = "結束時間必須大於開始時間。";
+            return false;
+        }
+
+        if (item.Duration is not null && trimStart is not null && trimStart >= item.Duration)
+        {
+            error = "開始時間不能大於或等於音檔長度。";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryParseOptionalTime(string? text, out TimeSpan? value)
+    {
+        value = null;
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return true;
+        }
+
+        var trimmed = text.Trim();
+        if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+            || double.TryParse(trimmed, NumberStyles.Float, CultureInfo.CurrentCulture, out seconds))
+        {
+            value = TimeSpan.FromSeconds(seconds);
+            return true;
+        }
+
+        var parts = trimmed.Split(':', StringSplitOptions.TrimEntries);
+        if (parts.Length is < 2 or > 3)
+        {
+            return false;
+        }
+
+        if (!double.TryParse(parts[^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedSeconds)
+            && !double.TryParse(parts[^1], NumberStyles.Float, CultureInfo.CurrentCulture, out parsedSeconds))
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[^2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var minutes))
+        {
+            return false;
+        }
+
+        var hours = 0;
+        if (parts.Length == 3
+            && !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out hours))
+        {
+            return false;
+        }
+
+        value = TimeSpan.FromHours(hours) + TimeSpan.FromMinutes(minutes) + TimeSpan.FromSeconds(parsedSeconds);
+        return true;
+    }
+
+    private static TimeSpan? GetEffectiveDuration(TimeSpan? duration, TimeSpan? trimStart, TimeSpan? trimEnd)
+    {
+        var start = trimStart ?? TimeSpan.Zero;
+
+        if (trimEnd is not null)
+        {
+            return trimEnd > start ? trimEnd - start : duration;
+        }
+
+        if (duration is not null && start > TimeSpan.Zero && duration > start)
+        {
+            return duration - start;
+        }
+
+        return duration;
+    }
+
     private void AudioList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         _selectedFile = AudioList.SelectedItem as AudioFileItem;
         OnPropertyChanged(nameof(SelectedFileText));
         OpenSelectedForPlayback(autoPlay: false);
+    }
+
+    private string GetProcessingInputPath(AudioFileItem item)
+    {
+        if (!UseAiProcessedAudio)
+        {
+            return item.FilePath;
+        }
+
+        var aiPath = FfmpegAudioProcessor.FindAiProcessedAudio(item.FilePath, _aiAudioFolder);
+        return aiPath ?? item.FilePath;
+    }
+
+    private static void TryDeleteDirectory(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     private void AudioList_MouseDoubleClick(object sender, MouseButtonEventArgs e)

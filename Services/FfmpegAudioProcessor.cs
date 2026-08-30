@@ -9,6 +9,9 @@ public sealed record AudioProcessingOptions(
     double SilenceThresholdDb,
     bool EnableDenoise,
     bool ReduceRoomTone,
+    bool EnhanceVoiceEq,
+    bool NormalizeLoudness,
+    bool EnableLimiter,
     double VolumeGainDb,
     string OutputFolder);
 
@@ -16,11 +19,29 @@ public sealed record AudioProcessingProgress(
     double Percent,
     TimeSpan? Position);
 
+public sealed record AudioMetadataOptions(
+    string? Title,
+    string? Artist,
+    string? Album,
+    string? CoverImagePath);
+
+public sealed record AudioOutputFormat(
+    string DisplayName,
+    string Extension,
+    string AudioCodec);
+
 public sealed class FfmpegAudioProcessor
 {
     private static readonly string[] SupportedExtensions =
     [
         ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".wma", ".mp4"
+    ];
+
+    public static IReadOnlyList<AudioOutputFormat> OutputFormats { get; } =
+    [
+        new("M4A / AAC", ".m4a", "aac"),
+        new("MP3", ".mp3", "libmp3lame"),
+        new("WAV", ".wav", "pcm_s16le")
     ];
 
     public static IReadOnlyCollection<string> AudioExtensions => SupportedExtensions;
@@ -32,9 +53,15 @@ public sealed class FfmpegAudioProcessor
         AudioProcessingOptions options,
         TimeSpan? duration = null,
         IProgress<AudioProcessingProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? audioCodec = null,
+        int? sampleRate = null,
+        int? channels = null,
+        TimeSpan? trimStart = null,
+        TimeSpan? trimEnd = null)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        var trimDuration = CalculateTrimDuration(trimStart, trimEnd);
 
         var filters = BuildFilters(options);
         var startInfo = new ProcessStartInfo
@@ -52,13 +79,43 @@ public sealed class FfmpegAudioProcessor
         startInfo.ArgumentList.Add("-y");
         startInfo.ArgumentList.Add("-threads");
         startInfo.ArgumentList.Add(GetWorkerThreadCount().ToString(CultureInfo.InvariantCulture));
+        if (trimStart is { TotalSeconds: > 0 })
+        {
+            startInfo.ArgumentList.Add("-ss");
+            startInfo.ArgumentList.Add(trimStart.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+        }
+
         startInfo.ArgumentList.Add("-i");
         startInfo.ArgumentList.Add(inputPath);
+
+        if (trimDuration is { TotalSeconds: > 0 })
+        {
+            startInfo.ArgumentList.Add("-t");
+            startInfo.ArgumentList.Add(trimDuration.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+        }
 
         if (!string.IsNullOrWhiteSpace(filters))
         {
             startInfo.ArgumentList.Add("-af");
             startInfo.ArgumentList.Add(filters);
+        }
+
+        if (sampleRate is not null)
+        {
+            startInfo.ArgumentList.Add("-ar");
+            startInfo.ArgumentList.Add(sampleRate.Value.ToString(CultureInfo.InvariantCulture));
+        }
+
+        if (channels is not null)
+        {
+            startInfo.ArgumentList.Add("-ac");
+            startInfo.ArgumentList.Add(channels.Value.ToString(CultureInfo.InvariantCulture));
+        }
+
+        if (!string.IsNullOrWhiteSpace(audioCodec))
+        {
+            startInfo.ArgumentList.Add("-c:a");
+            startInfo.ArgumentList.Add(audioCodec);
         }
 
         startInfo.ArgumentList.Add("-progress");
@@ -71,7 +128,7 @@ public sealed class FfmpegAudioProcessor
         SetBackgroundPriority(process);
 
         var errorTask = ReadOutputAsync(process.StandardError, cancellationToken);
-        var outputTask = ReadProgressAsync(process.StandardOutput, duration, progress, cancellationToken);
+        var outputTask = ReadProgressAsync(process.StandardOutput, trimDuration ?? duration, progress, cancellationToken);
 
         try
         {
@@ -87,6 +144,145 @@ public sealed class FfmpegAudioProcessor
         if (process.ExitCode != 0)
         {
             throw new InvalidOperationException($"FFmpeg 處理失敗，ExitCode={process.ExitCode}");
+        }
+    }
+
+    private static TimeSpan? CalculateTrimDuration(TimeSpan? trimStart, TimeSpan? trimEnd)
+    {
+        var start = trimStart is { TotalSeconds: > 0 } ? trimStart.Value : TimeSpan.Zero;
+        if (trimEnd is not { TotalSeconds: > 0 } || trimEnd.Value <= start)
+        {
+            return null;
+        }
+
+        return trimEnd.Value - start;
+    }
+
+    public async Task PrepareClipForMergeAsync(
+        string ffmpegPath,
+        string inputPath,
+        string outputPath,
+        double fadeInSeconds,
+        double fadeOutSeconds,
+        TimeSpan? duration = null,
+        IProgress<AudioProcessingProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+
+        fadeInSeconds = Math.Clamp(fadeInSeconds, 0, 10);
+        fadeOutSeconds = Math.Clamp(fadeOutSeconds, 0, 10);
+
+        var filters = new List<string>();
+
+        if (fadeInSeconds > 0)
+        {
+            filters.Add($"afade=t=in:st=0:d={fadeInSeconds.ToString("0.###", CultureInfo.InvariantCulture)}");
+        }
+
+        if (fadeOutSeconds > 0 && duration is { TotalSeconds: > 0 })
+        {
+            var actualFadeOut = Math.Min(fadeOutSeconds, duration.Value.TotalSeconds);
+            var fadeStart = Math.Max(duration.Value.TotalSeconds - actualFadeOut, 0);
+            filters.Add(
+                $"afade=t=out:st={fadeStart.ToString("0.###", CultureInfo.InvariantCulture)}:d={actualFadeOut.ToString("0.###", CultureInfo.InvariantCulture)}");
+        }
+
+        var arguments = new List<string>
+        {
+            "-hide_banner",
+            "-nostdin",
+            "-nostats",
+            "-y",
+            "-threads",
+            GetWorkerThreadCount().ToString(CultureInfo.InvariantCulture),
+            "-i",
+            inputPath
+        };
+
+        if (filters.Count > 0)
+        {
+            arguments.Add("-af");
+            arguments.Add(string.Join(",", filters));
+        }
+
+        arguments.AddRange(
+        [
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            "-progress",
+            "pipe:1",
+            outputPath
+        ]);
+
+        await RunFfmpegAsync(ffmpegPath, arguments, duration, progress, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task MergeAsync(
+        string ffmpegPath,
+        IReadOnlyList<string> segmentPaths,
+        string outputPath,
+        double gapSeconds,
+        IProgress<AudioProcessingProgress>? progress = null,
+        CancellationToken cancellationToken = default,
+        AudioMetadataOptions? metadata = null,
+        AudioOutputFormat? outputFormat = null)
+    {
+        if (segmentPaths.Count == 0)
+        {
+            throw new ArgumentException("沒有可合併的音檔。", nameof(segmentPaths));
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        var tempDirectory = Path.Combine(Path.GetDirectoryName(outputPath)!, $".merge_temp_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDirectory);
+
+        try
+        {
+            var concatInputs = new List<string>();
+            var totalDuration = TimeSpan.Zero;
+            var gapDuration = TimeSpan.FromSeconds(Math.Clamp(gapSeconds, 0, 10));
+            string? silencePath = null;
+
+            if (gapDuration > TimeSpan.Zero && segmentPaths.Count > 1)
+            {
+                silencePath = Path.Combine(tempDirectory, "silence.wav");
+                await CreateSilenceAsync(ffmpegPath, silencePath, gapDuration, cancellationToken).ConfigureAwait(false);
+            }
+
+            for (var index = 0; index < segmentPaths.Count; index++)
+            {
+                concatInputs.Add(segmentPaths[index]);
+                totalDuration += await ProbeDurationAsync(ffmpegPath, segmentPaths[index], cancellationToken).ConfigureAwait(false)
+                    ?? TimeSpan.Zero;
+
+                if (silencePath is not null && index < segmentPaths.Count - 1)
+                {
+                    concatInputs.Add(silencePath);
+                    totalDuration += gapDuration;
+                }
+            }
+
+            var concatListPath = Path.Combine(tempDirectory, "concat.txt");
+            await File.WriteAllLinesAsync(
+                concatListPath,
+                concatInputs.Select(path => $"file '{EscapeConcatPath(path)}'"),
+                cancellationToken).ConfigureAwait(false);
+
+            await RunFfmpegAsync(
+                ffmpegPath,
+                BuildMergeArguments(concatListPath, outputPath, metadata, outputFormat),
+                totalDuration,
+                progress,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempDirectory);
         }
     }
 
@@ -136,17 +332,21 @@ public sealed class FfmpegAudioProcessor
             : null;
     }
 
-    public static string MakeOutputPath(string inputPath, string outputFolder, string? customFileName = null)
+    public static string MakeOutputPath(
+        string inputPath,
+        string outputFolder,
+        string? customFileName = null,
+        string? outputExtension = null)
     {
-        var outputFileName = NormalizeOutputFileName(customFileName, inputPath);
+        var outputFileName = NormalizeOutputFileName(customFileName, inputPath, outputExtension);
         var baseName = Path.GetFileNameWithoutExtension(outputFileName);
-        var outputExtension = Path.GetExtension(outputFileName);
+        var extension = Path.GetExtension(outputFileName);
         var candidate = Path.Combine(outputFolder, outputFileName);
         var index = 2;
 
         while (File.Exists(candidate))
         {
-            candidate = Path.Combine(outputFolder, $"{baseName}_{index}{outputExtension}");
+            candidate = Path.Combine(outputFolder, $"{baseName}_{index}{extension}");
             index++;
         }
 
@@ -156,6 +356,59 @@ public sealed class FfmpegAudioProcessor
     public static bool IsSupportedAudioFile(string path)
     {
         return SupportedExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
+    }
+
+    public static string? FindAiProcessedAudio(string inputPath, string? aiAudioFolder)
+    {
+        if (string.IsNullOrWhiteSpace(aiAudioFolder) || !Directory.Exists(aiAudioFolder))
+        {
+            return null;
+        }
+
+        var baseName = Path.GetFileNameWithoutExtension(inputPath);
+        var candidateNames = new[]
+        {
+            baseName,
+            $"{baseName}_enhanced",
+            $"{baseName}-enhanced",
+            $"{baseName}_cleaned",
+            $"{baseName}-cleaned",
+            $"{baseName}_ai",
+            $"{baseName}-ai"
+        };
+
+        foreach (var candidateName in candidateNames)
+        {
+            foreach (var extension in SupportedExtensions)
+            {
+                var candidate = Path.Combine(aiAudioFolder, $"{candidateName}{extension}");
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return Directory
+            .EnumerateFiles(aiAudioFolder, "*.*", SearchOption.TopDirectoryOnly)
+            .Where(IsSupportedAudioFile)
+            .FirstOrDefault(path =>
+            {
+                var name = Path.GetFileNameWithoutExtension(path);
+                return name.StartsWith(baseName, StringComparison.CurrentCultureIgnoreCase)
+                    && (name.Contains("enhanced", StringComparison.CurrentCultureIgnoreCase)
+                        || name.Contains("clean", StringComparison.CurrentCultureIgnoreCase)
+                        || name.Contains("ai", StringComparison.CurrentCultureIgnoreCase));
+            });
+    }
+
+    public static string MakeMergedOutputPath(
+        string outputFolder,
+        string? customFileName = null,
+        string? outputExtension = null)
+    {
+        var sourcePath = Path.Combine(outputFolder, "podcast_merged.m4a");
+        return MakeOutputPath(sourcePath, outputFolder, customFileName, outputExtension);
     }
 
     public static string? TryFindFfmpeg()
@@ -225,6 +478,24 @@ public sealed class FfmpegAudioProcessor
             filters.Add("equalizer=f=500:t=q:w=1.2:g=-1.5");
         }
 
+        if (options.EnhanceVoiceEq)
+        {
+            filters.Add("equalizer=f=160:t=q:w=0.9:g=2");
+            filters.Add("equalizer=f=320:t=q:w=1.0:g=-1");
+            filters.Add("equalizer=f=3200:t=q:w=1.0:g=1");
+            filters.Add("acompressor=threshold=-18dB:ratio=2.2:attack=8:release=120:makeup=1.5dB");
+        }
+
+        if (options.NormalizeLoudness)
+        {
+            filters.Add("loudnorm=I=-16:TP=-1.5:LRA=11");
+        }
+
+        if (options.EnableLimiter)
+        {
+            filters.Add("alimiter=limit=0.84:attack=5:release=50");
+        }
+
         if (Math.Abs(volumeGainDb) >= 0.05)
         {
             filters.Add(string.Create(CultureInfo.InvariantCulture, $"volume={volumeGainDb:0.#}dB"));
@@ -245,6 +516,153 @@ public sealed class FfmpegAudioProcessor
             {
                 break;
             }
+        }
+    }
+
+    private static async Task CreateSilenceAsync(
+        string ffmpegPath,
+        string outputPath,
+        TimeSpan duration,
+        CancellationToken cancellationToken)
+    {
+        var arguments = new[]
+        {
+            "-hide_banner",
+            "-nostdin",
+            "-nostats",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=stereo",
+            "-t",
+            duration.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
+            "-c:a",
+            "pcm_s16le",
+            outputPath
+        };
+
+        await RunFfmpegAsync(ffmpegPath, arguments, null, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static IReadOnlyList<string> BuildMergeArguments(
+        string concatListPath,
+        string outputPath,
+        AudioMetadataOptions? metadata,
+        AudioOutputFormat? outputFormat)
+    {
+        outputFormat ??= OutputFormats[0];
+        var arguments = new List<string>
+        {
+            "-hide_banner",
+            "-nostdin",
+            "-nostats",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concatListPath
+        };
+
+        var hasCover = !string.IsNullOrWhiteSpace(metadata?.CoverImagePath)
+            && File.Exists(metadata.CoverImagePath)
+            && !string.Equals(outputFormat.Extension, ".wav", StringComparison.OrdinalIgnoreCase);
+
+        if (hasCover)
+        {
+            arguments.Add("-i");
+            arguments.Add(metadata!.CoverImagePath!);
+            arguments.Add("-map");
+            arguments.Add("0:a");
+            arguments.Add("-map");
+            arguments.Add("1:v");
+            arguments.Add("-c:v");
+            arguments.Add("mjpeg");
+            arguments.Add("-disposition:v");
+            arguments.Add("attached_pic");
+        }
+
+        arguments.Add("-c:a");
+        arguments.Add(outputFormat.AudioCodec);
+
+        AddMetadataArgument(arguments, "title", metadata?.Title);
+        AddMetadataArgument(arguments, "artist", metadata?.Artist);
+        AddMetadataArgument(arguments, "album", metadata?.Album);
+
+        if (hasCover)
+        {
+            arguments.Add("-metadata:s:v");
+            arguments.Add("title=Album cover");
+            arguments.Add("-metadata:s:v");
+            arguments.Add("comment=Cover (front)");
+        }
+
+        arguments.AddRange(
+        [
+            "-progress",
+            "pipe:1",
+            outputPath
+        ]);
+
+        return arguments;
+    }
+
+    private static void AddMetadataArgument(List<string> arguments, string key, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        arguments.Add("-metadata");
+        arguments.Add($"{key}={value.Trim()}");
+    }
+
+    private static async Task RunFfmpegAsync(
+        string ffmpegPath,
+        IReadOnlyList<string> arguments,
+        TimeSpan? duration,
+        IProgress<AudioProcessingProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true
+        };
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("無法啟動 FFmpeg。");
+
+        SetBackgroundPriority(process);
+
+        var errorTask = ReadOutputAsync(process.StandardError, cancellationToken);
+        var outputTask = ReadProgressAsync(process.StandardOutput, duration, progress, cancellationToken);
+
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await Task.WhenAll(errorTask, outputTask).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            KillProcessTree(process);
+            throw;
+        }
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"FFmpeg 處理失敗，ExitCode={process.ExitCode}");
         }
     }
 
@@ -351,6 +769,28 @@ public sealed class FfmpegAudioProcessor
         }
     }
 
+    private static string EscapeConcatPath(string path)
+    {
+        return path.Replace("\\", "/", StringComparison.Ordinal).Replace("'", "'\\''", StringComparison.Ordinal);
+    }
+
+    private static void TryDeleteDirectory(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
     private static string? FindSiblingFfprobe(string ffmpegPath)
     {
         var directory = Path.GetDirectoryName(ffmpegPath);
@@ -363,12 +803,16 @@ public sealed class FfmpegAudioProcessor
         return File.Exists(sibling) ? sibling : FindInPath("ffprobe.exe");
     }
 
-    private static string NormalizeOutputFileName(string? customFileName, string inputPath)
+    private static string NormalizeOutputFileName(
+        string? customFileName,
+        string inputPath,
+        string? outputExtension = null)
     {
         var inputExtension = Path.GetExtension(inputPath);
+        var preferredExtension = NormalizeExtension(outputExtension) ?? inputExtension;
         var fallbackBaseName = $"{Path.GetFileNameWithoutExtension(inputPath)}_processed";
         var fileName = string.IsNullOrWhiteSpace(customFileName)
-            ? $"{fallbackBaseName}{inputExtension}"
+            ? $"{fallbackBaseName}{preferredExtension}"
             : customFileName.Trim();
 
         fileName = Path.GetFileName(fileName);
@@ -386,10 +830,27 @@ public sealed class FfmpegAudioProcessor
 
         if (string.IsNullOrWhiteSpace(extension))
         {
-            extension = inputExtension;
+            extension = preferredExtension;
+        }
+        else if (!string.IsNullOrWhiteSpace(outputExtension))
+        {
+            extension = preferredExtension;
         }
 
         return $"{baseName}{extension}";
+    }
+
+    private static string? NormalizeExtension(string? extension)
+    {
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            return null;
+        }
+
+        var trimmed = extension.Trim();
+        return trimmed.StartsWith('.')
+            ? trimmed.ToLowerInvariant()
+            : $".{trimmed.ToLowerInvariant()}";
     }
 
     private static string? FindInPath(string fileName)

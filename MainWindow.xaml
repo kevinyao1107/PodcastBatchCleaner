@@ -180,6 +180,7 @@
                 <StackPanel Orientation="Horizontal">
                     <Button Click="SelectFolder_Click" Content="選取資料夾" />
                     <Button Click="ChooseOutputFolder_Click" Content="輸出位置" />
+                    <Button Click="ChooseAiAudioFolder_Click" Content="AI 音檔資料夾" />
                     <Button Click="ChooseFfmpeg_Click" Content="指定 FFmpeg" />
                 </StackPanel>
 
@@ -274,12 +275,24 @@
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock VerticalAlignment="Center"
                                        FontSize="16"
                                        FontWeight="SemiBold"
                                        Text="資料夾音檔清單" />
-                            <TextBlock Grid.Column="1"
+                            <Button Grid.Column="1"
+                                    MinHeight="28"
+                                    Padding="10,4"
+                                    Click="MoveSelectedUp_Click"
+                                    Content="上移" />
+                            <Button Grid.Column="2"
+                                    MinHeight="28"
+                                    Padding="10,4"
+                                    Click="MoveSelectedDown_Click"
+                                    Content="下移" />
+                            <TextBlock Grid.Column="3"
                                        VerticalAlignment="Center"
                                        Foreground="{StaticResource MutedTextBrush}"
                                        Text="{Binding FileCountText}" />
@@ -294,20 +307,42 @@
                               MouseDoubleClick="AudioList_MouseDoubleClick">
                         <ListView.View>
                             <GridView>
-                                <GridViewColumn Width="220" Header="檔名" DisplayMemberBinding="{Binding FileName}" />
-                                <GridViewColumn Width="76" Header="長度" DisplayMemberBinding="{Binding DurationText}" />
-                                <GridViewColumn Width="110" Header="狀態" DisplayMemberBinding="{Binding Status}" />
-                                <GridViewColumn Width="190" Header="輸出檔名">
+                                <GridViewColumn Width="180" Header="檔名" DisplayMemberBinding="{Binding FileName}" />
+                                <GridViewColumn Width="68" Header="長度" DisplayMemberBinding="{Binding DurationText}" />
+                                <GridViewColumn Width="90" Header="狀態" DisplayMemberBinding="{Binding Status}" />
+                                <GridViewColumn Width="82" Header="開始">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
-                                            <TextBox MinWidth="160"
+                                            <TextBox MinWidth="58"
+                                                     Padding="6,2"
+                                                     HorizontalContentAlignment="Right"
+                                                     Text="{Binding TrimStartText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                     ToolTip="可輸入秒數或 mm:ss，例如 12.5 或 01:23" />
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Width="82" Header="結束">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox MinWidth="58"
+                                                     Padding="6,2"
+                                                     HorizontalContentAlignment="Right"
+                                                     Text="{Binding TrimEndText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                     ToolTip="留空代表處理到音檔結尾" />
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Width="150" Header="輸出檔名">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBox MinWidth="120"
                                                      Padding="6,2"
                                                      Text="{Binding CustomOutputFileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                      ToolTip="不填會自動使用原檔名加 _processed" />
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Width="210" Header="處理後檔案" DisplayMemberBinding="{Binding ProcessedFileName}" />
+                                <GridViewColumn Width="170" Header="處理後檔案" DisplayMemberBinding="{Binding ProcessedFileName}" />
                             </GridView>
                         </ListView.View>
                     </ListView>
@@ -377,6 +412,11 @@
 
                         <CheckBox Margin="0,16,0,0"
                                   VerticalContentAlignment="Center"
+                                  Content="使用 AI 處理後音檔"
+                                  IsChecked="{Binding UseAiProcessedAudio, Mode=TwoWay}" />
+
+                        <CheckBox Margin="0,10,0,0"
+                                  VerticalContentAlignment="Center"
                                   Content="統一降噪"
                                   IsChecked="{Binding EnableDenoise, Mode=TwoWay}" />
 
@@ -384,6 +424,162 @@
                                   VerticalContentAlignment="Center"
                                   Content="減少空間音"
                                   IsChecked="{Binding ReduceRoomTone, Mode=TwoWay}" />
+
+                        <CheckBox Margin="0,10,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="人聲增厚 EQ"
+                                  IsChecked="{Binding EnhanceVoiceEq, Mode=TwoWay}" />
+
+                        <CheckBox Margin="0,10,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="Podcast 響度標準化 (-16 LUFS)"
+                                  IsChecked="{Binding NormalizeLoudness, Mode=TwoWay}" />
+
+                        <CheckBox Margin="0,10,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="防爆音 Limiter"
+                                  IsChecked="{Binding EnableLimiter, Mode=TwoWay}" />
+
+                        <Separator Margin="0,20" />
+
+                        <TextBlock FontSize="16"
+                                   FontWeight="SemiBold"
+                                   Text="統整輸出" />
+
+                        <CheckBox Margin="0,12,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="統整成單一檔案"
+                                  IsChecked="{Binding MergeSegments, Mode=TwoWay}" />
+
+                        <TextBlock Margin="0,14,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="段落間空白秒數（0 - 10 秒）" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="80" />
+                            </Grid.ColumnDefinitions>
+                            <Slider VerticalAlignment="Center"
+                                    Minimum="0"
+                                    Maximum="10"
+                                    TickFrequency="0.1"
+                                    SmallChange="0.1"
+                                    LargeChange="1"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding MergeGapSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <TextBox Grid.Column="1"
+                                     VerticalAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="8,0,0,0"
+                                     Text="{Binding MergeGapSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
+                        </Grid>
+
+                        <TextBlock Margin="0,14,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="輸出格式" />
+                        <ComboBox ItemsSource="{Binding OutputFormats}"
+                                  SelectedItem="{Binding SelectedOutputFormat, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName" />
+
+                        <TextBlock Margin="0,14,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="統整輸出檔名" />
+                        <TextBox Text="{Binding MergedOutputFileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                        <TextBlock Margin="0,16,0,6"
+                                   FontWeight="SemiBold"
+                                   Text="節目資訊" />
+
+                        <TextBlock Margin="0,10,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="標題" />
+                        <TextBox Text="{Binding PodcastTitle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                        <TextBlock Margin="0,10,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="作者 / 主持人" />
+                        <TextBox Text="{Binding PodcastArtist, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                        <TextBlock Margin="0,10,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="節目 / 專輯名稱" />
+                        <TextBox Text="{Binding PodcastAlbum, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                        <TextBlock Margin="0,12,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="{Binding CoverImageText}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Click="ChooseCoverImage_Click" Content="選封面" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearCoverImage_Click"
+                                    Content="清除封面" />
+                        </StackPanel>
+
+                        <TextBlock Margin="0,16,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="{Binding IntroAudioText}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Click="ChooseIntroAudio_Click" Content="選片頭" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearIntroAudio_Click"
+                                    Content="清除片頭" />
+                        </StackPanel>
+
+                        <TextBlock Margin="0,12,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="片頭淡入秒數（0 - 10 秒）" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="80" />
+                            </Grid.ColumnDefinitions>
+                            <Slider VerticalAlignment="Center"
+                                    Minimum="0"
+                                    Maximum="10"
+                                    TickFrequency="0.1"
+                                    SmallChange="0.1"
+                                    LargeChange="1"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding IntroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <TextBox Grid.Column="1"
+                                     VerticalAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="8,0,0,0"
+                                     Text="{Binding IntroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
+                        </Grid>
+
+                        <TextBlock Margin="0,16,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="{Binding OutroAudioText}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Click="ChooseOutroAudio_Click" Content="選片尾" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearOutroAudio_Click"
+                                    Content="清除片尾" />
+                        </StackPanel>
+
+                        <TextBlock Margin="0,12,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="片尾淡出秒數（0 - 10 秒）" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="80" />
+                            </Grid.ColumnDefinitions>
+                            <Slider VerticalAlignment="Center"
+                                    Minimum="0"
+                                    Maximum="10"
+                                    TickFrequency="0.1"
+                                    SmallChange="0.1"
+                                    LargeChange="1"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding OutroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <TextBox Grid.Column="1"
+                                     VerticalAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="8,0,0,0"
+                                     Text="{Binding OutroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
+                        </Grid>
 
                         <TextBlock Margin="0,18,0,6"
                                    Foreground="{StaticResource MutedTextBrush}"
@@ -460,6 +656,10 @@
                                    Foreground="{StaticResource MutedTextBrush}" />
                         <TextBlock Margin="0,10,0,0"
                                    Text="{Binding OutputFolderText}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock Margin="0,10,0,0"
+                                   Text="{Binding AiAudioFolderText}"
                                    TextWrapping="Wrap"
                                    Foreground="{StaticResource MutedTextBrush}" />
                     </StackPanel>

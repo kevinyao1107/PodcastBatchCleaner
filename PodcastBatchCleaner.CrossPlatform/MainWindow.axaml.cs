@@ -21,6 +21,7 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
     private AudioFileItem? _selectedFile;
     private string? _currentFolder;
     private string? _outputFolder;
+    private string? _aiAudioFolder;
     private string? _ffmpegPath;
     private string? _ffplayPath;
     private bool _isDraggingPosition;
@@ -28,7 +29,11 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
     private double _silenceSeconds = 0.1;
     private double _silenceThresholdDb = -35;
     private bool _enableDenoise = true;
+    private bool _useAiProcessedAudio;
     private bool _reduceRoomTone;
+    private bool _enhanceVoiceEq;
+    private bool _normalizeLoudness = true;
+    private bool _enableLimiter = true;
     private double _volumeGainDb;
     private int _playbackSourceIndex;
     private string _statusText = "請先選取資料夾。";
@@ -62,6 +67,10 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
     public string OutputFolderText => _outputFolder is null
         ? "輸出資料夾：尚未設定，預設會建立在來源資料夾下的 processed"
         : $"輸出資料夾：{_outputFolder}";
+
+    public string AiAudioFolderText => _aiAudioFolder is null
+        ? "AI 音檔資料夾：尚未設定"
+        : $"AI 音檔資料夾：{_aiAudioFolder}";
 
     public string FfmpegPathText => _ffmpegPath is null
         ? "FFmpeg：尚未找到，請指定 ffmpeg 或 ffmpeg.exe"
@@ -109,10 +118,34 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
         set => SetField(ref _enableDenoise, value);
     }
 
+    public bool UseAiProcessedAudio
+    {
+        get => _useAiProcessedAudio;
+        set => SetField(ref _useAiProcessedAudio, value);
+    }
+
     public bool ReduceRoomTone
     {
         get => _reduceRoomTone;
         set => SetField(ref _reduceRoomTone, value);
+    }
+
+    public bool EnhanceVoiceEq
+    {
+        get => _enhanceVoiceEq;
+        set => SetField(ref _enhanceVoiceEq, value);
+    }
+
+    public bool NormalizeLoudness
+    {
+        get => _normalizeLoudness;
+        set => SetField(ref _normalizeLoudness, value);
+    }
+
+    public bool EnableLimiter
+    {
+        get => _enableLimiter;
+        set => SetField(ref _enableLimiter, value);
     }
 
     public double VolumeGainDb
@@ -176,6 +209,26 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
         _outputFolder = path;
         OnPropertyChanged(nameof(OutputFolderText));
         StatusText = "已設定輸出資料夾。";
+    }
+
+    private async void ChooseAiAudioFolder_Click(object? sender, RoutedEventArgs e)
+    {
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "選取 AI 處理後音檔資料夾",
+            AllowMultiple = false
+        });
+
+        var folder = folders.FirstOrDefault();
+        if (folder?.Path.LocalPath is not { Length: > 0 } path)
+        {
+            return;
+        }
+
+        _aiAudioFolder = path;
+        UseAiProcessedAudio = true;
+        OnPropertyChanged(nameof(AiAudioFolderText));
+        StatusText = "已設定 AI 音檔資料夾。";
     }
 
     private async void ChooseFfmpeg_Click(object? sender, RoutedEventArgs e)
@@ -299,6 +352,9 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
             SilenceThresholdDb,
             EnableDenoise,
             ReduceRoomTone,
+            EnhanceVoiceEq,
+            NormalizeLoudness,
+            EnableLimiter,
             VolumeGainDb,
             _outputFolder);
 
@@ -313,13 +369,25 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
                 item.Status = $"處理中 {index + 1}/{items.Count}";
                 StatusText = $"處理中：{item.FileName}";
 
+                var processingInputPath = GetProcessingInputPath(item);
+                if (!string.Equals(processingInputPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    item.Status = "使用 AI 檔";
+                    StatusText = $"使用 AI 音檔：{item.FileName}";
+                }
+                else if (UseAiProcessedAudio)
+                {
+                    item.Status = "未找到 AI 檔";
+                    StatusText = $"找不到 AI 音檔，使用原檔：{item.FileName}";
+                }
+
                 var outputPath = FfmpegAudioProcessor.MakeOutputPath(
                     item.FilePath,
                     options.OutputFolder,
                     item.CustomOutputFileName);
                 await _processor.ProcessAsync(
                     ffmpegPath,
-                    item.FilePath,
+                    processingInputPath,
                     outputPath,
                     options,
                     cancellationToken: _processingCancellation.Token);
@@ -363,6 +431,17 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
     {
         _selectedFile = AudioList.SelectedItem as AudioFileItem;
         OnPropertyChanged(nameof(SelectedFileText));
+    }
+
+    private string GetProcessingInputPath(AudioFileItem item)
+    {
+        if (!UseAiProcessedAudio)
+        {
+            return item.FilePath;
+        }
+
+        var aiPath = FfmpegAudioProcessor.FindAiProcessedAudio(item.FilePath, _aiAudioFolder);
+        return aiPath ?? item.FilePath;
     }
 
     private void PlaybackSource_SelectionChanged(object? sender, SelectionChangedEventArgs e)
