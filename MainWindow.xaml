@@ -440,6 +440,28 @@
 
                         <CheckBox Margin="0,10,0,0"
                                   VerticalContentAlignment="Center"
+                                  Content="使用 AI 模型命令處理"
+                                  IsChecked="{Binding UseExternalAiModel, Mode=TwoWay}" />
+
+                        <TextBlock Margin="0,8,0,6"
+                                   Text="{Binding AiModelCommandText}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Click="ChooseAiModelCommand_Click" Content="選 AI 命令" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearAiModelCommand_Click"
+                                    Content="清除 AI 命令" />
+                        </StackPanel>
+
+                        <TextBlock Margin="0,10,0,6"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   Text="AI 命令參數" />
+                        <TextBox Text="{Binding AiModelArguments, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="必須包含 {input} 與 {output}，例如 --input &quot;{input}&quot; --output &quot;{output}&quot;" />
+
+                        <CheckBox Margin="0,10,0,0"
+                                  VerticalContentAlignment="Center"
                                   Content="統一降噪"
                                   IsChecked="{Binding EnableDenoise, Mode=TwoWay}" />
 
