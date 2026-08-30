@@ -366,6 +366,21 @@
                                    FontWeight="SemiBold"
                                    Text="處理設定" />
 
+                        <WrapPanel Margin="0,12,0,2">
+                            <Button Margin="0,0,8,8"
+                                    Click="ApplyPodcastPreset_Click"
+                                    Content="一般 Podcast" />
+                            <Button Margin="0,0,8,8"
+                                    Click="ApplyRoomTonePreset_Click"
+                                    Content="空間音重" />
+                            <Button Margin="0,0,8,8"
+                                    Click="ApplyThinVoicePreset_Click"
+                                    Content="聲音偏薄" />
+                            <Button Margin="0,0,8,8"
+                                    Click="ApplyTrimOnlyPreset_Click"
+                                    Content="只剪輯" />
+                        </WrapPanel>
+
                         <TextBlock Margin="0,18,0,6"
                                    Foreground="{StaticResource MutedTextBrush}"
                                    Text="空拍超過多久刪除（0.1 - 1.0 秒）" />

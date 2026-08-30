@@ -274,6 +274,84 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    private void ApplyPodcastPreset_Click(object sender, RoutedEventArgs e)
+    {
+        ApplyProcessingPreset(
+            silenceSeconds: 0.3,
+            silenceThresholdDb: -35,
+            enableDenoise: true,
+            reduceRoomTone: true,
+            enhanceVoiceEq: true,
+            normalizeLoudness: true,
+            enableLimiter: true,
+            volumeGainDb: 0,
+            "已套用：一般 Podcast。");
+    }
+
+    private void ApplyRoomTonePreset_Click(object sender, RoutedEventArgs e)
+    {
+        ApplyProcessingPreset(
+            silenceSeconds: 0.3,
+            silenceThresholdDb: -34,
+            enableDenoise: true,
+            reduceRoomTone: true,
+            enhanceVoiceEq: false,
+            normalizeLoudness: true,
+            enableLimiter: true,
+            volumeGainDb: 0,
+            "已套用：空間音重。");
+    }
+
+    private void ApplyThinVoicePreset_Click(object sender, RoutedEventArgs e)
+    {
+        ApplyProcessingPreset(
+            silenceSeconds: 0.2,
+            silenceThresholdDb: -36,
+            enableDenoise: true,
+            reduceRoomTone: true,
+            enhanceVoiceEq: true,
+            normalizeLoudness: true,
+            enableLimiter: true,
+            volumeGainDb: 1.5,
+            "已套用：聲音偏薄。");
+    }
+
+    private void ApplyTrimOnlyPreset_Click(object sender, RoutedEventArgs e)
+    {
+        ApplyProcessingPreset(
+            silenceSeconds: 0.1,
+            silenceThresholdDb: -35,
+            enableDenoise: false,
+            reduceRoomTone: false,
+            enhanceVoiceEq: false,
+            normalizeLoudness: false,
+            enableLimiter: false,
+            volumeGainDb: 0,
+            "已套用：只剪輯不後製。");
+    }
+
+    private void ApplyProcessingPreset(
+        double silenceSeconds,
+        double silenceThresholdDb,
+        bool enableDenoise,
+        bool reduceRoomTone,
+        bool enhanceVoiceEq,
+        bool normalizeLoudness,
+        bool enableLimiter,
+        double volumeGainDb,
+        string statusText)
+    {
+        SilenceSeconds = silenceSeconds;
+        SilenceThresholdDb = silenceThresholdDb;
+        EnableDenoise = enableDenoise;
+        ReduceRoomTone = reduceRoomTone;
+        EnhanceVoiceEq = enhanceVoiceEq;
+        NormalizeLoudness = normalizeLoudness;
+        EnableLimiter = enableLimiter;
+        VolumeGainDb = volumeGainDb;
+        StatusText = statusText;
+    }
+
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrWhiteSpace(_ffmpegPath) || !File.Exists(_ffmpegPath))
