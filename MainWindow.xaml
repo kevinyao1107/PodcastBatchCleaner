@@ -203,6 +203,7 @@
                             Background="{StaticResource AccentBrush}"
                             BorderBrush="{StaticResource AccentBrush}"
                             Foreground="#07100E" />
+                    <Button Click="CompareSelected_Click" Content="A/B 比較" />
                     <Button Click="OpenProcessedFile_Click" Content="開處理後檔" />
                     <Button Click="CancelProcessing_Click" Content="取消" />
                 </StackPanel>
@@ -309,9 +310,13 @@
 
                     <ListView x:Name="AudioList"
                               Grid.Row="1"
+                              AllowDrop="True"
                               ItemsSource="{Binding AudioFiles}"
                               SelectionMode="Extended"
                               SelectionChanged="AudioList_SelectionChanged"
+                              PreviewMouseLeftButtonDown="AudioList_PreviewMouseLeftButtonDown"
+                              MouseMove="AudioList_MouseMove"
+                              Drop="AudioList_Drop"
                               MouseDoubleClick="AudioList_MouseDoubleClick">
                         <ListView.View>
                             <GridView>
@@ -437,28 +442,6 @@
                                   VerticalContentAlignment="Center"
                                   Content="使用 AI 處理後音檔"
                                   IsChecked="{Binding UseAiProcessedAudio, Mode=TwoWay}" />
-
-                        <CheckBox Margin="0,10,0,0"
-                                  VerticalContentAlignment="Center"
-                                  Content="使用 AI 模型命令處理"
-                                  IsChecked="{Binding UseExternalAiModel, Mode=TwoWay}" />
-
-                        <TextBlock Margin="0,8,0,6"
-                                   Text="{Binding AiModelCommandText}"
-                                   TextWrapping="Wrap"
-                                   Foreground="{StaticResource MutedTextBrush}" />
-                        <StackPanel Orientation="Horizontal">
-                            <Button Click="ChooseAiModelCommand_Click" Content="選 AI 命令" />
-                            <Button Margin="8,0,0,0"
-                                    Click="ClearAiModelCommand_Click"
-                                    Content="清除 AI 命令" />
-                        </StackPanel>
-
-                        <TextBlock Margin="0,10,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="AI 命令參數" />
-                        <TextBox Text="{Binding AiModelArguments, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 ToolTip="必須包含 {input} 與 {output}，例如 --input &quot;{input}&quot; --output &quot;{output}&quot;" />
 
                         <CheckBox Margin="0,10,0,0"
                                   VerticalContentAlignment="Center"

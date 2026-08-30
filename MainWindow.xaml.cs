@@ -21,12 +21,13 @@ namespace PodcastBatchCleanerWpf;
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
     private readonly FfmpegAudioProcessor _processor = new();
-    private readonly ExternalAiAudioProcessor _aiProcessor = new();
     private readonly MediaPlayer _player = new();
     private readonly DispatcherTimer _playbackTimer;
     private static readonly JsonSerializerOptions SettingsJsonOptions = new() { WriteIndented = true };
     private CancellationTokenSource? _processingCancellation;
     private AudioFileItem? _selectedFile;
+    private AudioFileItem? _draggedAudioFile;
+    private System.Windows.Point _dragStartPoint;
     private string? _currentFolder;
     private string? _outputFolder;
     private string? _aiAudioFolder;
@@ -37,9 +38,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private double _silenceThresholdDb = -35;
     private bool _enableDenoise = true;
     private bool _useAiProcessedAudio;
-    private bool _useExternalAiModel;
-    private string? _aiModelCommandPath;
-    private string _aiModelArguments = "--input \"{input}\" --output \"{output}\"";
     private bool _reduceRoomTone;
     private bool _enhanceVoiceEq;
     private bool _normalizeLoudness = true;
@@ -99,10 +97,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string AiAudioFolderText => _aiAudioFolder is null
         ? "AI 音檔資料夾：尚未設定"
         : $"AI 音檔資料夾：{_aiAudioFolder}";
-
-    public string AiModelCommandText => _aiModelCommandPath is null
-        ? "AI 模型命令：尚未設定"
-        : $"AI 模型命令：{_aiModelCommandPath}";
 
     public string FfmpegPathText => _ffmpegPath is null
         ? "FFmpeg：尚未找到，請指定 ffmpeg.exe 後再輸出"
@@ -190,18 +184,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         get => _useAiProcessedAudio;
         set => SetField(ref _useAiProcessedAudio, value);
-    }
-
-    public bool UseExternalAiModel
-    {
-        get => _useExternalAiModel;
-        set => SetField(ref _useExternalAiModel, value);
-    }
-
-    public string AiModelArguments
-    {
-        get => _aiModelArguments;
-        set => SetField(ref _aiModelArguments, value);
     }
 
     public bool ReduceRoomTone
@@ -466,34 +448,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定 AI 音檔資料夾。";
     }
 
-    private void ChooseAiModelCommand_Click(object sender, RoutedEventArgs e)
-    {
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            Title = "選取 AI 模型命令",
-            Filter = "執行檔或腳本|*.exe;*.cmd;*.bat;*.ps1;*.py|所有檔案|*.*",
-            InitialDirectory = _currentFolder ?? Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
-        };
-
-        if (dialog.ShowDialog(this) != true)
-        {
-            return;
-        }
-
-        _aiModelCommandPath = dialog.FileName;
-        UseExternalAiModel = true;
-        OnPropertyChanged(nameof(AiModelCommandText));
-        StatusText = "已設定 AI 模型命令。";
-    }
-
-    private void ClearAiModelCommand_Click(object sender, RoutedEventArgs e)
-    {
-        _aiModelCommandPath = null;
-        UseExternalAiModel = false;
-        OnPropertyChanged(nameof(AiModelCommandText));
-        StatusText = "已清除 AI 模型命令。";
-    }
-
     private void ChooseIntroAudio_Click(object sender, RoutedEventArgs e)
     {
         var selectedPath = ChooseAudioFile("選取片頭音檔");
@@ -657,6 +611,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await ProcessItemsAsync(AudioFiles.ToList());
     }
 
+    private async void CompareSelected_Click(object sender, RoutedEventArgs e)
+    {
+        var item = GetSelectedAudioFile();
+        if (item is null)
+        {
+            StatusText = "請先選取要比較的音檔。";
+            return;
+        }
+
+        await ProcessComparisonAsync(item);
+    }
+
     private void MoveSelectedUp_Click(object sender, RoutedEventArgs e)
     {
         MoveSelectedItem(-1);
@@ -792,9 +758,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         CurrentProcessingFileText = string.Empty;
         var summary = new ProcessingRunSummary(items.Count, _outputFolder, MergeSegments);
         var showSummary = false;
-        var aiTempDirectory = UseExternalAiModel
-            ? Path.Combine(_outputFolder, $".ai_stage_{Guid.NewGuid():N}")
-            : null;
 
         var options = new AudioProcessingOptions(
             SilenceSeconds,
@@ -843,24 +806,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     progressWindow.SetProgress(item.FileName, ProcessingProgress);
 
                     var processingInputPath = GetProcessingInputPath(item);
-                    if (UseExternalAiModel)
-                    {
-                        processingInputPath = await ProcessWithExternalAiModelAsync(
-                            processingInputPath,
-                            item.FileName,
-                            aiTempDirectory!,
-                            progressWindow,
-                            Math.Clamp((itemIndex / (double)total) * 100, 0, 100),
-                            Math.Clamp(((itemIndex + 0.35d) / total) * 100, 0, 100),
-                            _processingCancellation.Token);
-                    }
-
                     if (!string.Equals(processingInputPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
                     {
-                        item.Status = UseExternalAiModel ? "AI 模型完成" : "使用 AI 檔";
-                        StatusText = UseExternalAiModel
-                            ? $"AI 模型處理完成：{item.FileName}"
-                            : $"使用 AI 音檔：{item.FileName}";
+                        item.Status = "使用 AI 檔";
+                        StatusText = $"使用 AI 音檔：{item.FileName}";
                     }
                     else if (UseAiProcessedAudio)
                     {
@@ -890,10 +839,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
                     var progress = new Progress<AudioProcessingProgress>(current =>
                     {
-                        var itemPercent = UseExternalAiModel
-                            ? 0.35d + (current.Percent * 0.65d)
-                            : current.Percent;
-                        var overallPercent = Math.Clamp(((itemIndex + itemPercent) / total) * 100, 0, 100);
+                        var overallPercent = Math.Clamp(((itemIndex + current.Percent) / total) * 100, 0, 100);
                         ProcessingProgress = overallPercent;
                         ProcessingProgressText = $"{overallPercent:0}%";
                         progressWindow.SetProgress(item.FileName, overallPercent);
@@ -984,10 +930,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ShowProcessingSummary(summary);
             }
 
-            if (aiTempDirectory is not null)
-            {
-                TryDeleteDirectory(aiTempDirectory);
-            }
         }
     }
 
@@ -1051,24 +993,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 progressWindow.SetProgress(item.FileName, ProcessingProgress);
 
                 var processingInputPath = GetProcessingInputPath(item);
-                if (UseExternalAiModel)
-                {
-                    processingInputPath = await ProcessWithExternalAiModelAsync(
-                        processingInputPath,
-                        item.FileName,
-                        tempDirectory,
-                        progressWindow,
-                        Math.Clamp((completedSteps / totalSteps) * 100, 0, 100),
-                        Math.Clamp(((completedSteps + 0.35d) / totalSteps) * 100, 0, 100),
-                        _processingCancellation?.Token ?? CancellationToken.None);
-                }
-
                 if (!string.Equals(processingInputPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
                 {
-                    item.Status = UseExternalAiModel ? "AI 模型完成" : "使用 AI 檔";
-                    StatusText = UseExternalAiModel
-                        ? $"AI 模型處理完成：{item.FileName}"
-                        : $"使用 AI 音檔：{item.FileName}";
+                    item.Status = "使用 AI 檔";
+                    StatusText = $"使用 AI 音檔：{item.FileName}";
                 }
                 else if (UseAiProcessedAudio)
                 {
@@ -1093,10 +1021,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 var effectiveDuration = GetEffectiveDuration(duration, trimStart, trimEnd);
                 var progress = new Progress<AudioProcessingProgress>(current =>
                 {
-                    var stepPercent = UseExternalAiModel
-                        ? 0.35d + (current.Percent * 0.65d)
-                        : current.Percent;
-                    UpdateMergeStepProgress(item.FileName, stepStart, stepPercent, totalSteps, progressWindow);
+                    UpdateMergeStepProgress(item.FileName, stepStart, current.Percent, totalSteps, progressWindow);
                     item.Status = $"{ProcessingProgress:0}%";
                 });
 
@@ -1198,6 +1123,139 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         finally
         {
             TryDeleteDirectory(tempDirectory);
+        }
+    }
+
+    private async Task ProcessComparisonAsync(AudioFileItem item)
+    {
+        if (_isProcessing)
+        {
+            StatusText = "目前已經在處理中。";
+            return;
+        }
+
+        var ffmpegPath = _ffmpegPath;
+        if (ffmpegPath is null || !File.Exists(ffmpegPath))
+        {
+            StatusText = "請先指定 ffmpeg.exe。";
+            return;
+        }
+
+        _outputFolder ??= _currentFolder is null
+            ? Path.Combine(AppContext.BaseDirectory, "processed")
+            : Path.Combine(_currentFolder, "processed");
+
+        var preflightErrors = ValidateProcessingInputs([item], ffmpegPath, _outputFolder);
+        if (preflightErrors.Count > 0)
+        {
+            ShowPreflightErrors(preflightErrors);
+            StatusText = "A/B 比較前檢查未通過。";
+            return;
+        }
+
+        var comparisonFolder = Path.Combine(_outputFolder, "ab_compare");
+        Directory.CreateDirectory(comparisonFolder);
+
+        _isProcessing = true;
+        _processingCancellation = new CancellationTokenSource();
+        IsProgressVisible = true;
+        ProcessingProgress = 0;
+        ProcessingProgressText = "0%";
+        CurrentProcessingFileText = item.FileName;
+
+        var progressWindow = new ProcessingProgressWindow
+        {
+            Owner = this
+        };
+        progressWindow.CancelRequested += (_, _) => _processingCancellation?.Cancel();
+        progressWindow.Show();
+
+        var outputs = new List<string>();
+
+        try
+        {
+            var processingInputPath = GetProcessingInputPath(item);
+            if (item.Duration is null)
+            {
+                item.Duration = await _processor.ProbeDurationAsync(
+                    ffmpegPath,
+                    processingInputPath,
+                    _processingCancellation.Token);
+            }
+
+            if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+            {
+                throw new InvalidOperationException($"{item.FileName}：{trimError}");
+            }
+
+            var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
+            var presets = CreateComparisonPresets();
+
+            for (var index = 0; index < presets.Count; index++)
+            {
+                _processingCancellation.Token.ThrowIfCancellationRequested();
+
+                var preset = presets[index];
+                item.Status = $"比較 {index + 1}/{presets.Count}";
+                StatusText = $"A/B 比較：{preset.DisplayName}";
+                CurrentProcessingFileText = $"{item.FileName} - {preset.DisplayName}";
+
+                var outputPath = FfmpegAudioProcessor.MakeOutputPath(
+                    item.FilePath,
+                    comparisonFolder,
+                    $"{Path.GetFileNameWithoutExtension(item.FileName)}_{preset.FileSuffix}",
+                    SelectedOutputFormat.Extension);
+                var itemIndex = index;
+                var progress = new Progress<AudioProcessingProgress>(current =>
+                {
+                    var overallPercent = Math.Clamp(((itemIndex + current.Percent) / presets.Count) * 100, 0, 100);
+                    ProcessingProgress = overallPercent;
+                    ProcessingProgressText = $"{overallPercent:0}%";
+                    progressWindow.SetProgress($"{item.FileName} - {preset.DisplayName}", overallPercent);
+                    item.Status = $"{overallPercent:0}%";
+                });
+
+                await _processor.ProcessAsync(
+                    ffmpegPath,
+                    processingInputPath,
+                    outputPath,
+                    preset.Options with { OutputFolder = comparisonFolder },
+                    effectiveDuration,
+                    progress,
+                    cancellationToken: _processingCancellation.Token,
+                    audioCodec: SelectedOutputFormat.AudioCodec,
+                    trimStart: trimStart,
+                    trimEnd: trimEnd);
+
+                outputs.Add(outputPath);
+                item.ProcessedPath = outputPath;
+                ProcessingProgress = Math.Clamp(((index + 1d) / presets.Count) * 100, 0, 100);
+                ProcessingProgressText = $"{ProcessingProgress:0}%";
+            }
+
+            item.Status = "比較完成";
+            StatusText = $"A/B 比較完成：{comparisonFolder}";
+            ShowComparisonSummary(comparisonFolder, outputs);
+        }
+        catch (OperationCanceledException)
+        {
+            item.Status = "已取消";
+            StatusText = "A/B 比較已取消。";
+        }
+        catch (Exception ex)
+        {
+            item.Status = "比較失敗";
+            StatusText = $"A/B 比較失敗：{ex.Message}";
+            System.Windows.MessageBox.Show(this, ex.Message, "A/B 比較失敗", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            _isProcessing = false;
+            _processingCancellation?.Dispose();
+            _processingCancellation = null;
+            CurrentProcessingFileText = string.Empty;
+            IsProgressVisible = false;
+            progressWindow.Close();
         }
     }
 
@@ -1331,41 +1389,98 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return duration;
     }
 
-    private async Task<string> ProcessWithExternalAiModelAsync(
-        string inputPath,
-        string displayName,
-        string tempDirectory,
-        ProcessingProgressWindow progressWindow,
-        double startOverallPercent,
-        double completeOverallPercent,
-        CancellationToken cancellationToken)
+    private IReadOnlyList<ComparisonPreset> CreateComparisonPresets()
     {
-        if (string.IsNullOrWhiteSpace(_aiModelCommandPath))
+        return
+        [
+            new(
+                "一般 Podcast",
+                "ab_podcast",
+                CreateProcessingOptions(
+                    silenceSeconds: 0.3,
+                    silenceThresholdDb: -35,
+                    enableDenoise: true,
+                    reduceRoomTone: true,
+                    enhanceVoiceEq: true,
+                    normalizeLoudness: true,
+                    enableLimiter: true,
+                    volumeGainDb: 0)),
+            new(
+                "空間音重",
+                "ab_room",
+                CreateProcessingOptions(
+                    silenceSeconds: 0.3,
+                    silenceThresholdDb: -34,
+                    enableDenoise: true,
+                    reduceRoomTone: true,
+                    enhanceVoiceEq: false,
+                    normalizeLoudness: true,
+                    enableLimiter: true,
+                    volumeGainDb: 0)),
+            new(
+                "聲音偏薄",
+                "ab_thin_voice",
+                CreateProcessingOptions(
+                    silenceSeconds: 0.2,
+                    silenceThresholdDb: -36,
+                    enableDenoise: true,
+                    reduceRoomTone: true,
+                    enhanceVoiceEq: true,
+                    normalizeLoudness: true,
+                    enableLimiter: true,
+                    volumeGainDb: 1.5)),
+            new(
+                "只剪輯",
+                "ab_trim_only",
+                CreateProcessingOptions(
+                    silenceSeconds: 0.1,
+                    silenceThresholdDb: -35,
+                    enableDenoise: false,
+                    reduceRoomTone: false,
+                    enhanceVoiceEq: false,
+                    normalizeLoudness: false,
+                    enableLimiter: false,
+                    volumeGainDb: 0))
+        ];
+    }
+
+    private AudioProcessingOptions CreateProcessingOptions(
+        double silenceSeconds,
+        double silenceThresholdDb,
+        bool enableDenoise,
+        bool reduceRoomTone,
+        bool enhanceVoiceEq,
+        bool normalizeLoudness,
+        bool enableLimiter,
+        double volumeGainDb)
+    {
+        return new AudioProcessingOptions(
+            silenceSeconds,
+            silenceThresholdDb,
+            enableDenoise,
+            reduceRoomTone,
+            enhanceVoiceEq,
+            normalizeLoudness,
+            enableLimiter,
+            volumeGainDb,
+            _outputFolder ?? string.Empty);
+    }
+
+    private void ShowComparisonSummary(string comparisonFolder, IReadOnlyList<string> outputs)
+    {
+        var message = new StringBuilder()
+            .AppendLine("A/B 比較完成。")
+            .AppendLine()
+            .AppendLine($"輸出資料夾：{comparisonFolder}")
+            .AppendLine()
+            .AppendLine("輸出檔案：");
+
+        foreach (var output in outputs)
         {
-            throw new InvalidOperationException("尚未設定 AI 模型命令。");
+            message.AppendLine($"- {Path.GetFileName(output)}");
         }
 
-        Directory.CreateDirectory(tempDirectory);
-        var aiOutputPath = Path.Combine(
-            tempDirectory,
-            $"{Path.GetFileNameWithoutExtension(displayName)}_ai_{Guid.NewGuid():N}.wav");
-
-        ProcessingProgress = startOverallPercent;
-        ProcessingProgressText = $"{ProcessingProgress:0}%";
-        progressWindow.SetProgress(displayName, ProcessingProgress);
-        StatusText = $"AI 模型處理：{displayName}";
-
-        await _aiProcessor.ProcessAsync(
-            _aiModelCommandPath,
-            AiModelArguments,
-            inputPath,
-            aiOutputPath,
-            cancellationToken);
-
-        ProcessingProgress = completeOverallPercent;
-        ProcessingProgressText = $"{ProcessingProgress:0}%";
-        progressWindow.SetProgress(displayName, ProcessingProgress);
-        return aiOutputPath;
+        System.Windows.MessageBox.Show(this, message.ToString(), "A/B 比較", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private List<string> ValidateProcessingInputs(
@@ -1395,19 +1510,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (UseAiProcessedAudio && (string.IsNullOrWhiteSpace(_aiAudioFolder) || !Directory.Exists(_aiAudioFolder)))
         {
             errors.Add("已勾選使用 AI 處理後音檔，但 AI 音檔資料夾不存在。");
-        }
-
-        if (UseExternalAiModel)
-        {
-            if (string.IsNullOrWhiteSpace(_aiModelCommandPath) || !File.Exists(_aiModelCommandPath))
-            {
-                errors.Add("已勾選使用 AI 模型命令處理，但 AI 模型命令不存在。");
-            }
-
-            if (!ExternalAiAudioProcessor.HasRequiredPlaceholders(AiModelArguments))
-            {
-                errors.Add("AI 命令參數必須包含 {input} 與 {output}。");
-            }
         }
 
         if (!string.IsNullOrWhiteSpace(_introAudioPath) && !File.Exists(_introAudioPath))
@@ -1549,7 +1651,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _outputFolder = settings.OutputFolder;
             _aiAudioFolder = settings.AiAudioFolder;
             _ffmpegPath = settings.FfmpegPath;
-            _aiModelCommandPath = settings.AiModelCommandPath;
             _introAudioPath = settings.IntroAudioPath;
             _outroAudioPath = settings.OutroAudioPath;
             _coverImagePath = settings.CoverImagePath;
@@ -1558,10 +1659,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SilenceThresholdDb = settings.SilenceThresholdDb;
             EnableDenoise = settings.EnableDenoise;
             UseAiProcessedAudio = settings.UseAiProcessedAudio;
-            UseExternalAiModel = settings.UseExternalAiModel;
-            AiModelArguments = string.IsNullOrWhiteSpace(settings.AiModelArguments)
-                ? "--input \"{input}\" --output \"{output}\""
-                : settings.AiModelArguments;
             ReduceRoomTone = settings.ReduceRoomTone;
             EnhanceVoiceEq = settings.EnhanceVoiceEq;
             NormalizeLoudness = settings.NormalizeLoudness;
@@ -1585,7 +1682,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             OnPropertyChanged(nameof(CurrentFolderText));
             OnPropertyChanged(nameof(OutputFolderText));
             OnPropertyChanged(nameof(AiAudioFolderText));
-            OnPropertyChanged(nameof(AiModelCommandText));
             OnPropertyChanged(nameof(FfmpegPathText));
             OnPropertyChanged(nameof(IntroAudioText));
             OnPropertyChanged(nameof(OutroAudioText));
@@ -1615,7 +1711,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 OutputFolder = _outputFolder,
                 AiAudioFolder = _aiAudioFolder,
                 FfmpegPath = _ffmpegPath,
-                AiModelCommandPath = _aiModelCommandPath,
                 IntroAudioPath = _introAudioPath,
                 OutroAudioPath = _outroAudioPath,
                 CoverImagePath = _coverImagePath,
@@ -1623,8 +1718,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 SilenceThresholdDb = SilenceThresholdDb,
                 EnableDenoise = EnableDenoise,
                 UseAiProcessedAudio = UseAiProcessedAudio,
-                UseExternalAiModel = UseExternalAiModel,
-                AiModelArguments = AiModelArguments,
                 ReduceRoomTone = ReduceRoomTone,
                 EnhanceVoiceEq = EnhanceVoiceEq,
                 NormalizeLoudness = NormalizeLoudness,
@@ -1680,6 +1773,64 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void AudioList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         OpenSelectedForPlayback(autoPlay: true);
+    }
+
+    private void AudioList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _dragStartPoint = e.GetPosition(null);
+        _draggedAudioFile = null;
+
+        if (FindAncestor<System.Windows.Controls.TextBox>(e.OriginalSource as DependencyObject) is not null)
+        {
+            return;
+        }
+
+        var listViewItem = FindAncestor<System.Windows.Controls.ListViewItem>(e.OriginalSource as DependencyObject);
+        _draggedAudioFile = listViewItem?.DataContext as AudioFileItem;
+    }
+
+    private void AudioList_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || _draggedAudioFile is null)
+        {
+            return;
+        }
+
+        var currentPosition = e.GetPosition(null);
+        if (Math.Abs(currentPosition.X - _dragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance
+            && Math.Abs(currentPosition.Y - _dragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+        {
+            return;
+        }
+
+        DragDrop.DoDragDrop(AudioList, _draggedAudioFile, System.Windows.DragDropEffects.Move);
+    }
+
+    private void AudioList_Drop(object sender, System.Windows.DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(typeof(AudioFileItem)))
+        {
+            return;
+        }
+
+        var sourceItem = e.Data.GetData(typeof(AudioFileItem)) as AudioFileItem;
+        var targetItem = FindAncestor<System.Windows.Controls.ListViewItem>(e.OriginalSource as DependencyObject)?.DataContext as AudioFileItem;
+        if (sourceItem is null || targetItem is null || ReferenceEquals(sourceItem, targetItem))
+        {
+            return;
+        }
+
+        var sourceIndex = AudioFiles.IndexOf(sourceItem);
+        var targetIndex = AudioFiles.IndexOf(targetItem);
+        if (sourceIndex < 0 || targetIndex < 0)
+        {
+            return;
+        }
+
+        AudioFiles.Move(sourceIndex, targetIndex);
+        AudioList.SelectedItem = sourceItem;
+        AudioList.ScrollIntoView(sourceItem);
+        StatusText = "已拖曳調整合併順序。";
     }
 
     private void PlaybackSource_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1881,6 +2032,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : value.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
     }
 
+    private static T? FindAncestor<T>(DependencyObject? current)
+        where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T match)
+            {
+                return match;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
+
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {
         if (EqualityComparer<T>.Default.Equals(field, value))
@@ -1917,6 +2084,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private sealed record ProcessingFailure(string FileName, string ErrorMessage);
 
+    private sealed record ComparisonPreset(
+        string DisplayName,
+        string FileSuffix,
+        AudioProcessingOptions Options);
+
     private sealed class AppSettings
     {
         public string? CurrentFolder { get; set; }
@@ -1926,12 +2098,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         public string? AiAudioFolder { get; set; }
 
         public string? FfmpegPath { get; set; }
-
-        public string? AiModelCommandPath { get; set; }
-
-        public bool UseExternalAiModel { get; set; }
-
-        public string AiModelArguments { get; set; } = "--input \"{input}\" --output \"{output}\"";
 
         public string? IntroAudioPath { get; set; }
 

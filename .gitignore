@@ -15,8 +15,6 @@ obj/
 **/.publish_obj/
 release/
 **/release/
-.ai_stage_*/
-**/.ai_stage_*/
 .merge_stage_*/
 **/.merge_stage_*/
 .merge_temp_*/
