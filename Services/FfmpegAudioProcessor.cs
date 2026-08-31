@@ -222,6 +222,65 @@ public sealed class FfmpegAudioProcessor
         await RunFfmpegAsync(ffmpegPath, arguments, duration, progress, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task PrepareDeepFilterNetInputAsync(
+        string ffmpegPath,
+        string inputPath,
+        string outputPath,
+        TimeSpan? duration = null,
+        IProgress<AudioProcessingProgress>? progress = null,
+        CancellationToken cancellationToken = default,
+        TimeSpan? trimStart = null,
+        TimeSpan? trimEnd = null)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        var trimDuration = CalculateTrimDuration(trimStart, trimEnd);
+
+        var arguments = new List<string>
+        {
+            "-hide_banner",
+            "-nostdin",
+            "-nostats",
+            "-y",
+            "-threads",
+            GetWorkerThreadCount().ToString(CultureInfo.InvariantCulture)
+        };
+
+        if (trimStart is { TotalSeconds: > 0 })
+        {
+            arguments.Add("-ss");
+            arguments.Add(trimStart.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+        }
+
+        arguments.Add("-i");
+        arguments.Add(inputPath);
+
+        if (trimDuration is { TotalSeconds: > 0 })
+        {
+            arguments.Add("-t");
+            arguments.Add(trimDuration.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+        }
+
+        arguments.AddRange(
+        [
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            "-progress",
+            "pipe:1",
+            outputPath
+        ]);
+
+        await RunFfmpegAsync(
+            ffmpegPath,
+            arguments,
+            trimDuration ?? duration,
+            progress,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task MergeAsync(
         string ffmpegPath,
         IReadOnlyList<string> segmentPaths,

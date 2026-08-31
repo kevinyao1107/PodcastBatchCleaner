@@ -445,6 +445,27 @@
 
                         <CheckBox Margin="0,10,0,0"
                                   VerticalContentAlignment="Center"
+                                  Content="DeepFilterNet AI 降噪"
+                                  IsChecked="{Binding EnableDeepFilterNet, Mode=TwoWay}" />
+
+                        <CheckBox Margin="18,8,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="DeepFilterNet PostFilter"
+                                  IsChecked="{Binding EnableDeepFilterNetPostFilter, Mode=TwoWay}" />
+
+                        <TextBlock Margin="0,8,0,6"
+                                   Text="{Binding DeepFilterNetPathText}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Click="ChooseDeepFilterNet_Click" Content="指定 DFN" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearDeepFilterNet_Click"
+                                    Content="清除" />
+                        </StackPanel>
+
+                        <CheckBox Margin="0,10,0,0"
+                                  VerticalContentAlignment="Center"
                                   Content="統一降噪"
                                   IsChecked="{Binding EnableDenoise, Mode=TwoWay}" />
 

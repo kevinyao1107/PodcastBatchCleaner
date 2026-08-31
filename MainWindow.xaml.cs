@@ -21,6 +21,7 @@ namespace PodcastBatchCleanerWpf;
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
     private readonly FfmpegAudioProcessor _processor = new();
+    private readonly DeepFilterNetAudioProcessor _deepFilterNetProcessor = new();
     private readonly MediaPlayer _player = new();
     private readonly DispatcherTimer _playbackTimer;
     private static readonly JsonSerializerOptions SettingsJsonOptions = new() { WriteIndented = true };
@@ -38,6 +39,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private double _silenceThresholdDb = -35;
     private bool _enableDenoise = true;
     private bool _useAiProcessedAudio;
+    private bool _enableDeepFilterNet;
+    private bool _enableDeepFilterNetPostFilter = true;
+    private string? _deepFilterNetPath;
     private bool _reduceRoomTone;
     private bool _enhanceVoiceEq;
     private bool _normalizeLoudness = true;
@@ -97,6 +101,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string AiAudioFolderText => _aiAudioFolder is null
         ? "AI 音檔資料夾：尚未設定"
         : $"AI 音檔資料夾：{_aiAudioFolder}";
+
+    public string DeepFilterNetPathText => _deepFilterNetPath is null
+        ? "DeepFilterNet：尚未設定 deep-filter.exe"
+        : $"DeepFilterNet：{_deepFilterNetPath}";
 
     public string FfmpegPathText => _ffmpegPath is null
         ? "FFmpeg：尚未找到，請指定 ffmpeg.exe 後再輸出"
@@ -184,6 +192,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         get => _useAiProcessedAudio;
         set => SetField(ref _useAiProcessedAudio, value);
+    }
+
+    public bool EnableDeepFilterNet
+    {
+        get => _enableDeepFilterNet;
+        set => SetField(ref _enableDeepFilterNet, value);
+    }
+
+    public bool EnableDeepFilterNetPostFilter
+    {
+        get => _enableDeepFilterNetPostFilter;
+        set => SetField(ref _enableDeepFilterNetPostFilter, value);
     }
 
     public bool ReduceRoomTone
@@ -446,6 +466,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         UseAiProcessedAudio = true;
         OnPropertyChanged(nameof(AiAudioFolderText));
         StatusText = "已設定 AI 音檔資料夾。";
+    }
+
+    private void ChooseDeepFilterNet_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "選取 deep-filter.exe",
+            Filter = "DeepFilterNet|deep-filter.exe|執行檔|*.exe|所有檔案|*.*",
+            InitialDirectory = _currentFolder ?? Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        _deepFilterNetPath = dialog.FileName;
+        EnableDeepFilterNet = true;
+        OnPropertyChanged(nameof(DeepFilterNetPathText));
+        StatusText = "已設定 DeepFilterNet。";
+    }
+
+    private void ClearDeepFilterNet_Click(object sender, RoutedEventArgs e)
+    {
+        _deepFilterNetPath = null;
+        EnableDeepFilterNet = false;
+        OnPropertyChanged(nameof(DeepFilterNetPathText));
+        StatusText = "已清除 DeepFilterNet。";
     }
 
     private void ChooseIntroAudio_Click(object sender, RoutedEventArgs e)
@@ -758,6 +806,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         CurrentProcessingFileText = string.Empty;
         var summary = new ProcessingRunSummary(items.Count, _outputFolder, MergeSegments);
         var showSummary = false;
+        var deepFilterTempDirectory = EnableDeepFilterNet
+            ? Path.Combine(_outputFolder, $".deepfilter_stage_{Guid.NewGuid():N}")
+            : null;
 
         var options = new AudioProcessingOptions(
             SilenceSeconds,
@@ -837,9 +888,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     }
 
                     var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
+                    if (EnableDeepFilterNet)
+                    {
+                        processingInputPath = await ProcessWithDeepFilterNetAsync(
+                            ffmpegPath,
+                            processingInputPath,
+                            item.FileName,
+                            deepFilterTempDirectory!,
+                            progressWindow,
+                            Math.Clamp((itemIndex / (double)total) * 100, 0, 100),
+                            Math.Clamp(((itemIndex + 0.45d) / total) * 100, 0, 100),
+                            effectiveDuration,
+                            trimStart,
+                            trimEnd,
+                            _processingCancellation.Token);
+
+                        trimStart = null;
+                        trimEnd = null;
+                        effectiveDuration = await _processor.ProbeDurationAsync(
+                            ffmpegPath,
+                            processingInputPath,
+                            _processingCancellation.Token);
+                    }
+
                     var progress = new Progress<AudioProcessingProgress>(current =>
                     {
-                        var overallPercent = Math.Clamp(((itemIndex + current.Percent) / total) * 100, 0, 100);
+                        var itemPercent = EnableDeepFilterNet
+                            ? 0.45d + (current.Percent * 0.55d)
+                            : current.Percent;
+                        var overallPercent = Math.Clamp(((itemIndex + itemPercent) / total) * 100, 0, 100);
                         ProcessingProgress = overallPercent;
                         ProcessingProgressText = $"{overallPercent:0}%";
                         progressWindow.SetProgress(item.FileName, overallPercent);
@@ -930,6 +1007,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ShowProcessingSummary(summary);
             }
 
+            if (deepFilterTempDirectory is not null)
+            {
+                TryDeleteDirectory(deepFilterTempDirectory);
+            }
         }
     }
 
@@ -1019,9 +1100,36 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 var segmentPath = Path.Combine(tempDirectory, $"{index + 1:0000}.wav");
                 var stepStart = completedSteps;
                 var effectiveDuration = GetEffectiveDuration(duration, trimStart, trimEnd);
+
+                if (EnableDeepFilterNet)
+                {
+                    processingInputPath = await ProcessWithDeepFilterNetAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        item.FileName,
+                        tempDirectory,
+                        progressWindow,
+                        Math.Clamp((stepStart / totalSteps) * 100, 0, 100),
+                        Math.Clamp(((stepStart + 0.45d) / totalSteps) * 100, 0, 100),
+                        effectiveDuration,
+                        trimStart,
+                        trimEnd,
+                        _processingCancellation?.Token ?? CancellationToken.None);
+
+                    trimStart = null;
+                    trimEnd = null;
+                    effectiveDuration = await _processor.ProbeDurationAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        _processingCancellation?.Token ?? CancellationToken.None);
+                }
+
                 var progress = new Progress<AudioProcessingProgress>(current =>
                 {
-                    UpdateMergeStepProgress(item.FileName, stepStart, current.Percent, totalSteps, progressWindow);
+                    var itemPercent = EnableDeepFilterNet
+                        ? 0.45d + (current.Percent * 0.55d)
+                        : current.Percent;
+                    UpdateMergeStepProgress(item.FileName, stepStart, itemPercent, totalSteps, progressWindow);
                     item.Status = $"{ProcessingProgress:0}%";
                 });
 
@@ -1171,6 +1279,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         progressWindow.Show();
 
         var outputs = new List<string>();
+        var comparisonTempDirectory = EnableDeepFilterNet
+            ? Path.Combine(comparisonFolder, $".deepfilter_compare_{Guid.NewGuid():N}")
+            : null;
 
         try
         {
@@ -1189,6 +1300,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
 
             var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
+            if (EnableDeepFilterNet)
+            {
+                processingInputPath = await ProcessWithDeepFilterNetAsync(
+                    ffmpegPath,
+                    processingInputPath,
+                    item.FileName,
+                    comparisonTempDirectory!,
+                    progressWindow,
+                    0,
+                    25,
+                    effectiveDuration,
+                    trimStart,
+                    trimEnd,
+                    _processingCancellation.Token);
+
+                trimStart = null;
+                trimEnd = null;
+                effectiveDuration = await _processor.ProbeDurationAsync(
+                    ffmpegPath,
+                    processingInputPath,
+                    _processingCancellation.Token);
+            }
+
             var presets = CreateComparisonPresets();
 
             for (var index = 0; index < presets.Count; index++)
@@ -1208,7 +1342,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 var itemIndex = index;
                 var progress = new Progress<AudioProcessingProgress>(current =>
                 {
-                    var overallPercent = Math.Clamp(((itemIndex + current.Percent) / presets.Count) * 100, 0, 100);
+                    var presetBase = EnableDeepFilterNet ? 0.25d : 0d;
+                    var presetRange = EnableDeepFilterNet ? 0.75d : 1d;
+                    var overallPercent = Math.Clamp(
+                        (presetBase + (((itemIndex + current.Percent) / presets.Count) * presetRange)) * 100,
+                        0,
+                        100);
                     ProcessingProgress = overallPercent;
                     ProcessingProgressText = $"{overallPercent:0}%";
                     progressWindow.SetProgress($"{item.FileName} - {preset.DisplayName}", overallPercent);
@@ -1229,7 +1368,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                 outputs.Add(outputPath);
                 item.ProcessedPath = outputPath;
-                ProcessingProgress = Math.Clamp(((index + 1d) / presets.Count) * 100, 0, 100);
+                var completedBase = EnableDeepFilterNet ? 0.25d : 0d;
+                var completedRange = EnableDeepFilterNet ? 0.75d : 1d;
+                ProcessingProgress = Math.Clamp(
+                    (completedBase + (((index + 1d) / presets.Count) * completedRange)) * 100,
+                    0,
+                    100);
                 ProcessingProgressText = $"{ProcessingProgress:0}%";
             }
 
@@ -1256,6 +1400,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             CurrentProcessingFileText = string.Empty;
             IsProgressVisible = false;
             progressWindow.Close();
+
+            if (comparisonTempDirectory is not null)
+            {
+                TryDeleteDirectory(comparisonTempDirectory);
+            }
         }
     }
 
@@ -1389,6 +1538,70 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return duration;
     }
 
+    private async Task<string> ProcessWithDeepFilterNetAsync(
+        string ffmpegPath,
+        string inputPath,
+        string displayName,
+        string tempDirectory,
+        ProcessingProgressWindow progressWindow,
+        double startOverallPercent,
+        double completeOverallPercent,
+        TimeSpan? duration,
+        TimeSpan? trimStart,
+        TimeSpan? trimEnd,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_deepFilterNetPath) || !File.Exists(_deepFilterNetPath))
+        {
+            throw new InvalidOperationException("已勾選 DeepFilterNet AI 降噪，但找不到 deep-filter.exe。");
+        }
+
+        var inputDirectory = Path.Combine(tempDirectory, "dfn_input");
+        var outputDirectory = Path.Combine(tempDirectory, "dfn_output");
+        Directory.CreateDirectory(inputDirectory);
+        Directory.CreateDirectory(outputDirectory);
+
+        var baseName = Path.GetFileNameWithoutExtension(displayName);
+        var preparedInputPath = Path.Combine(inputDirectory, $"{baseName}_{Guid.NewGuid():N}.wav");
+        var totalRange = Math.Max(completeOverallPercent - startOverallPercent, 0);
+
+        StatusText = $"DeepFilterNet 準備：{displayName}";
+        CurrentProcessingFileText = displayName;
+
+        var prepareProgress = new Progress<AudioProcessingProgress>(current =>
+        {
+            var overallPercent = Math.Clamp(startOverallPercent + (totalRange * 0.35d * current.Percent), 0, 100);
+            ProcessingProgress = overallPercent;
+            ProcessingProgressText = $"{overallPercent:0}%";
+            progressWindow.SetProgress($"準備 AI 音檔：{displayName}", overallPercent);
+        });
+
+        await _processor.PrepareDeepFilterNetInputAsync(
+            ffmpegPath,
+            inputPath,
+            preparedInputPath,
+            duration,
+            prepareProgress,
+            cancellationToken,
+            trimStart,
+            trimEnd);
+
+        StatusText = $"DeepFilterNet AI 降噪：{displayName}";
+        progressWindow.SetProgress($"AI 降噪：{displayName}", Math.Clamp(startOverallPercent + (totalRange * 0.35d), 0, 100));
+
+        var deepFilteredPath = await _deepFilterNetProcessor.ProcessAsync(
+            _deepFilterNetPath,
+            preparedInputPath,
+            outputDirectory,
+            EnableDeepFilterNetPostFilter,
+            cancellationToken);
+
+        ProcessingProgress = Math.Clamp(completeOverallPercent, 0, 100);
+        ProcessingProgressText = $"{ProcessingProgress:0}%";
+        progressWindow.SetProgress($"AI 降噪完成：{displayName}", ProcessingProgress);
+        return deepFilteredPath;
+    }
+
     private IReadOnlyList<ComparisonPreset> CreateComparisonPresets()
     {
         return
@@ -1510,6 +1723,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (UseAiProcessedAudio && (string.IsNullOrWhiteSpace(_aiAudioFolder) || !Directory.Exists(_aiAudioFolder)))
         {
             errors.Add("已勾選使用 AI 處理後音檔，但 AI 音檔資料夾不存在。");
+        }
+
+        if (EnableDeepFilterNet && (string.IsNullOrWhiteSpace(_deepFilterNetPath) || !File.Exists(_deepFilterNetPath)))
+        {
+            errors.Add("已勾選 DeepFilterNet AI 降噪，但找不到 deep-filter.exe。");
         }
 
         if (!string.IsNullOrWhiteSpace(_introAudioPath) && !File.Exists(_introAudioPath))
@@ -1654,11 +1872,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _introAudioPath = settings.IntroAudioPath;
             _outroAudioPath = settings.OutroAudioPath;
             _coverImagePath = settings.CoverImagePath;
+            _deepFilterNetPath = settings.DeepFilterNetPath;
 
             SilenceSeconds = settings.SilenceSeconds;
             SilenceThresholdDb = settings.SilenceThresholdDb;
             EnableDenoise = settings.EnableDenoise;
             UseAiProcessedAudio = settings.UseAiProcessedAudio;
+            EnableDeepFilterNet = settings.EnableDeepFilterNet;
+            EnableDeepFilterNetPostFilter = settings.EnableDeepFilterNetPostFilter;
             ReduceRoomTone = settings.ReduceRoomTone;
             EnhanceVoiceEq = settings.EnhanceVoiceEq;
             NormalizeLoudness = settings.NormalizeLoudness;
@@ -1686,6 +1907,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             OnPropertyChanged(nameof(IntroAudioText));
             OnPropertyChanged(nameof(OutroAudioText));
             OnPropertyChanged(nameof(CoverImageText));
+            OnPropertyChanged(nameof(DeepFilterNetPathText));
         }
         catch (JsonException)
         {
@@ -1714,10 +1936,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 IntroAudioPath = _introAudioPath,
                 OutroAudioPath = _outroAudioPath,
                 CoverImagePath = _coverImagePath,
+                DeepFilterNetPath = _deepFilterNetPath,
                 SilenceSeconds = SilenceSeconds,
                 SilenceThresholdDb = SilenceThresholdDb,
                 EnableDenoise = EnableDenoise,
                 UseAiProcessedAudio = UseAiProcessedAudio,
+                EnableDeepFilterNet = EnableDeepFilterNet,
+                EnableDeepFilterNetPostFilter = EnableDeepFilterNetPostFilter,
                 ReduceRoomTone = ReduceRoomTone,
                 EnhanceVoiceEq = EnhanceVoiceEq,
                 NormalizeLoudness = NormalizeLoudness,
@@ -2105,6 +2330,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         public string? CoverImagePath { get; set; }
 
+        public string? DeepFilterNetPath { get; set; }
+
         public double SilenceSeconds { get; set; } = 0.1;
 
         public double SilenceThresholdDb { get; set; } = -35;
@@ -2112,6 +2339,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         public bool EnableDenoise { get; set; } = true;
 
         public bool UseAiProcessedAudio { get; set; }
+
+        public bool EnableDeepFilterNet { get; set; }
+
+        public bool EnableDeepFilterNetPostFilter { get; set; } = true;
 
         public bool ReduceRoomTone { get; set; }
 

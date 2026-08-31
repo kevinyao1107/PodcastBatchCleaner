@@ -19,6 +19,10 @@ release/
 **/.merge_stage_*/
 .merge_temp_*/
 **/.merge_temp_*/
+.deepfilter_stage_*/
+**/.deepfilter_stage_*/
+.deepfilter_compare_*/
+**/.deepfilter_compare_*/
 
 # User and IDE files
 .agents/
