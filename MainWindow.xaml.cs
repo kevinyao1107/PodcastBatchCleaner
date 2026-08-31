@@ -25,6 +25,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly MediaPlayer _player = new();
     private readonly DispatcherTimer _playbackTimer;
     private static readonly JsonSerializerOptions SettingsJsonOptions = new() { WriteIndented = true };
+    private static readonly TimeSpan PreviewDuration = TimeSpan.FromSeconds(30);
     private CancellationTokenSource? _processingCancellation;
     private AudioFileItem? _selectedFile;
     private AudioFileItem? _draggedAudioFile;
@@ -41,6 +42,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _useAiProcessedAudio;
     private bool _enableDeepFilterNet;
     private bool _enableDeepFilterNetPostFilter = true;
+    private bool _fallbackToFfmpegWhenAiFails = true;
     private string? _deepFilterNetPath;
     private bool _reduceRoomTone;
     private bool _enhanceVoiceEq;
@@ -204,6 +206,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         get => _enableDeepFilterNetPostFilter;
         set => SetField(ref _enableDeepFilterNetPostFilter, value);
+    }
+
+    public bool FallbackToFfmpegWhenAiFails
+    {
+        get => _fallbackToFfmpegWhenAiFails;
+        set => SetField(ref _fallbackToFfmpegWhenAiFails, value);
     }
 
     public bool ReduceRoomTone
@@ -677,6 +685,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await ProcessComparisonAsync(item);
     }
 
+    private async void PreviewSelected_Click(object sender, RoutedEventArgs e)
+    {
+        var item = GetSelectedAudioFile();
+        if (item is null)
+        {
+            StatusText = "請先選取要試聽的音檔。";
+            return;
+        }
+
+        await ProcessPreviewAsync(item);
+    }
+
     private void MoveSelectedUp_Click(object sender, RoutedEventArgs e)
     {
         MoveSelectedItem(-1);
@@ -896,25 +916,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
                     if (EnableDeepFilterNet)
                     {
-                        processingInputPath = await ProcessWithDeepFilterNetAsync(
-                            ffmpegPath,
-                            processingInputPath,
-                            item.FileName,
-                            deepFilterTempDirectory!,
-                            progressWindow,
-                            Math.Clamp((itemIndex / (double)total) * 100, 0, 100),
-                            Math.Clamp(((itemIndex + 0.45d) / total) * 100, 0, 100),
-                            effectiveDuration,
-                            trimStart,
-                            trimEnd,
-                            _processingCancellation.Token);
+                        try
+                        {
+                            processingInputPath = await ProcessWithDeepFilterNetAsync(
+                                ffmpegPath,
+                                processingInputPath,
+                                item.FileName,
+                                deepFilterTempDirectory!,
+                                progressWindow,
+                                Math.Clamp((itemIndex / (double)total) * 100, 0, 100),
+                                Math.Clamp(((itemIndex + 0.45d) / total) * 100, 0, 100),
+                                effectiveDuration,
+                                trimStart,
+                                trimEnd,
+                                _processingCancellation.Token);
 
-                        trimStart = null;
-                        trimEnd = null;
-                        effectiveDuration = await _processor.ProbeDurationAsync(
-                            ffmpegPath,
-                            processingInputPath,
-                            _processingCancellation.Token);
+                            trimStart = null;
+                            trimEnd = null;
+                            effectiveDuration = await _processor.ProbeDurationAsync(
+                                ffmpegPath,
+                                processingInputPath,
+                                _processingCancellation.Token);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
+                        {
+                            item.Status = "AI 失敗，改用 FFmpeg";
+                            StatusText = $"DeepFilterNet 失敗，改用 FFmpeg：{item.FileName}";
+                            progressWindow.SetProgress($"AI 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
+                        }
                     }
 
                     var progress = new Progress<AudioProcessingProgress>(current =>
@@ -1109,25 +1138,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                 if (EnableDeepFilterNet)
                 {
-                    processingInputPath = await ProcessWithDeepFilterNetAsync(
-                        ffmpegPath,
-                        processingInputPath,
-                        item.FileName,
-                        tempDirectory,
-                        progressWindow,
-                        Math.Clamp((stepStart / totalSteps) * 100, 0, 100),
-                        Math.Clamp(((stepStart + 0.45d) / totalSteps) * 100, 0, 100),
-                        effectiveDuration,
-                        trimStart,
-                        trimEnd,
-                        _processingCancellation?.Token ?? CancellationToken.None);
+                    try
+                    {
+                        processingInputPath = await ProcessWithDeepFilterNetAsync(
+                            ffmpegPath,
+                            processingInputPath,
+                            item.FileName,
+                            tempDirectory,
+                            progressWindow,
+                            Math.Clamp((stepStart / totalSteps) * 100, 0, 100),
+                            Math.Clamp(((stepStart + 0.45d) / totalSteps) * 100, 0, 100),
+                            effectiveDuration,
+                            trimStart,
+                            trimEnd,
+                            _processingCancellation?.Token ?? CancellationToken.None);
 
-                    trimStart = null;
-                    trimEnd = null;
-                    effectiveDuration = await _processor.ProbeDurationAsync(
-                        ffmpegPath,
-                        processingInputPath,
-                        _processingCancellation?.Token ?? CancellationToken.None);
+                        trimStart = null;
+                        trimEnd = null;
+                        effectiveDuration = await _processor.ProbeDurationAsync(
+                            ffmpegPath,
+                            processingInputPath,
+                            _processingCancellation?.Token ?? CancellationToken.None);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
+                    {
+                        item.Status = "AI 失敗，改用 FFmpeg";
+                        StatusText = $"DeepFilterNet 失敗，改用 FFmpeg：{item.FileName}";
+                        progressWindow.SetProgress($"AI 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
+                    }
                 }
 
                 var progress = new Progress<AudioProcessingProgress>(current =>
@@ -1308,25 +1346,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
             if (EnableDeepFilterNet)
             {
-                processingInputPath = await ProcessWithDeepFilterNetAsync(
-                    ffmpegPath,
-                    processingInputPath,
-                    item.FileName,
-                    comparisonTempDirectory!,
-                    progressWindow,
-                    0,
-                    25,
-                    effectiveDuration,
-                    trimStart,
-                    trimEnd,
-                    _processingCancellation.Token);
+                try
+                {
+                    processingInputPath = await ProcessWithDeepFilterNetAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        item.FileName,
+                        comparisonTempDirectory!,
+                        progressWindow,
+                        0,
+                        25,
+                        effectiveDuration,
+                        trimStart,
+                        trimEnd,
+                        _processingCancellation.Token);
 
-                trimStart = null;
-                trimEnd = null;
-                effectiveDuration = await _processor.ProbeDurationAsync(
-                    ffmpegPath,
-                    processingInputPath,
-                    _processingCancellation.Token);
+                    trimStart = null;
+                    trimEnd = null;
+                    effectiveDuration = await _processor.ProbeDurationAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        _processingCancellation.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
+                {
+                    item.Status = "AI 失敗，改用 FFmpeg";
+                    StatusText = $"DeepFilterNet 失敗，A/B 改用 FFmpeg：{item.FileName}";
+                    progressWindow.SetProgress($"AI 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
+                }
             }
 
             var presets = CreateComparisonPresets();
@@ -1410,6 +1457,200 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (comparisonTempDirectory is not null)
             {
                 TryDeleteDirectory(comparisonTempDirectory);
+            }
+        }
+    }
+
+    private async Task ProcessPreviewAsync(AudioFileItem item)
+    {
+        if (_isProcessing)
+        {
+            StatusText = "目前已經在處理中。";
+            return;
+        }
+
+        var ffmpegPath = _ffmpegPath;
+        if (ffmpegPath is null || !File.Exists(ffmpegPath))
+        {
+            StatusText = "請先指定 ffmpeg.exe。";
+            return;
+        }
+
+        _outputFolder ??= _currentFolder is null
+            ? Path.Combine(AppContext.BaseDirectory, "processed")
+            : Path.Combine(_currentFolder, "processed");
+
+        var previewFolder = Path.Combine(_outputFolder, "preview");
+        var preflightErrors = ValidateProcessingInputs([item], ffmpegPath, previewFolder);
+        if (preflightErrors.Count > 0)
+        {
+            ShowPreflightErrors(preflightErrors);
+            StatusText = "試聽前檢查未通過。";
+            return;
+        }
+
+        Directory.CreateDirectory(previewFolder);
+
+        _isProcessing = true;
+        _processingCancellation = new CancellationTokenSource();
+        IsProgressVisible = true;
+        ProcessingProgress = 0;
+        ProcessingProgressText = "0%";
+        CurrentProcessingFileText = item.FileName;
+
+        var progressWindow = new ProcessingProgressWindow
+        {
+            Owner = this
+        };
+        progressWindow.CancelRequested += (_, _) => _processingCancellation?.Cancel();
+        progressWindow.Show();
+
+        var previewTempDirectory = EnableDeepFilterNet
+            ? Path.Combine(previewFolder, $".preview_stage_{Guid.NewGuid():N}")
+            : null;
+
+        try
+        {
+            item.IsProcessing = true;
+            item.Status = "產生試聽";
+            StatusText = $"產生 30 秒試聽：{item.FileName}";
+
+            var processingInputPath = GetProcessingInputPath(item);
+            if (item.Duration is null)
+            {
+                item.Duration = await _processor.ProbeDurationAsync(
+                    ffmpegPath,
+                    processingInputPath,
+                    _processingCancellation.Token);
+            }
+
+            if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+            {
+                item.Status = "剪輯時間錯誤";
+                throw new InvalidOperationException(trimError);
+            }
+
+            var previewStart = trimStart ?? TimeSpan.Zero;
+            var previewEnd = previewStart + PreviewDuration;
+            if (trimEnd is not null && trimEnd < previewEnd)
+            {
+                previewEnd = trimEnd.Value;
+            }
+
+            if (item.Duration is not null && item.Duration < previewEnd)
+            {
+                previewEnd = item.Duration.Value;
+            }
+
+            trimEnd = previewEnd > previewStart ? previewEnd : trimEnd;
+            var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
+
+            if (EnableDeepFilterNet)
+            {
+                try
+                {
+                    processingInputPath = await ProcessWithDeepFilterNetAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        item.FileName,
+                        previewTempDirectory!,
+                        progressWindow,
+                        0,
+                        45,
+                        effectiveDuration,
+                        trimStart,
+                        trimEnd,
+                        _processingCancellation.Token);
+
+                    trimStart = null;
+                    trimEnd = null;
+                    effectiveDuration = await _processor.ProbeDurationAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        _processingCancellation.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
+                {
+                    item.Status = "AI 失敗，改用 FFmpeg";
+                    StatusText = $"DeepFilterNet 失敗，試聽改用 FFmpeg：{item.FileName}";
+                    progressWindow.SetProgress($"AI 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
+                }
+            }
+
+            var options = new AudioProcessingOptions(
+                SilenceSeconds,
+                SilenceThresholdDb,
+                EnableDenoise,
+                ReduceRoomTone,
+                EnhanceVoiceEq,
+                NormalizeLoudness,
+                EnableLimiter,
+                VolumeGainDb,
+                previewFolder);
+
+            var outputPath = FfmpegAudioProcessor.MakeOutputPath(
+                item.FilePath,
+                previewFolder,
+                $"{Path.GetFileNameWithoutExtension(item.FileName)}_preview",
+                SelectedOutputFormat.Extension);
+
+            var progress = new Progress<AudioProcessingProgress>(current =>
+            {
+                var percent = EnableDeepFilterNet ? 45 + (current.Percent * 55) : current.Percent * 100;
+                ProcessingProgress = Math.Clamp(percent, 0, 100);
+                ProcessingProgressText = $"{ProcessingProgress:0}%";
+                progressWindow.SetProgress($"FFmpeg 試聽輸出：{item.FileName}", ProcessingProgress);
+                item.Status = $"{ProcessingProgress:0}%";
+                StatusText = $"FFmpeg 試聽輸出：{item.FileName}";
+            });
+
+            await _processor.ProcessAsync(
+                ffmpegPath,
+                processingInputPath,
+                outputPath,
+                options,
+                effectiveDuration,
+                progress,
+                cancellationToken: _processingCancellation.Token,
+                audioCodec: SelectedOutputFormat.AudioCodec,
+                trimStart: trimStart,
+                trimEnd: trimEnd);
+
+            item.ProcessedPath = outputPath;
+            item.Status = "試聽完成";
+            ProcessingProgress = 100;
+            ProcessingProgressText = "100%";
+            progressWindow.SetProgress($"試聽完成：{item.FileName}", 100);
+            StatusText = $"試聽完成：{Path.GetFileName(outputPath)}";
+
+            _selectedFile = item;
+            PlaybackSourceIndex = 1;
+            OpenSelectedForPlayback(autoPlay: true);
+        }
+        catch (OperationCanceledException)
+        {
+            item.Status = "已取消";
+            StatusText = "試聽已取消。";
+        }
+        catch (Exception ex)
+        {
+            item.Status = "試聽失敗";
+            StatusText = $"試聽失敗：{ex.Message}";
+            System.Windows.MessageBox.Show(this, ex.Message, "試聽失敗", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            item.IsProcessing = false;
+            _isProcessing = false;
+            _processingCancellation?.Dispose();
+            _processingCancellation = null;
+            CurrentProcessingFileText = string.Empty;
+            IsProgressVisible = false;
+            progressWindow.Close();
+
+            if (previewTempDirectory is not null)
+            {
+                TryDeleteDirectory(previewTempDirectory);
             }
         }
     }
@@ -1886,6 +2127,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             UseAiProcessedAudio = settings.UseAiProcessedAudio;
             EnableDeepFilterNet = settings.EnableDeepFilterNet;
             EnableDeepFilterNetPostFilter = settings.EnableDeepFilterNetPostFilter;
+            FallbackToFfmpegWhenAiFails = settings.FallbackToFfmpegWhenAiFails;
             ReduceRoomTone = settings.ReduceRoomTone;
             EnhanceVoiceEq = settings.EnhanceVoiceEq;
             NormalizeLoudness = settings.NormalizeLoudness;
@@ -1949,6 +2191,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 UseAiProcessedAudio = UseAiProcessedAudio,
                 EnableDeepFilterNet = EnableDeepFilterNet,
                 EnableDeepFilterNetPostFilter = EnableDeepFilterNetPostFilter,
+                FallbackToFfmpegWhenAiFails = FallbackToFfmpegWhenAiFails,
                 ReduceRoomTone = ReduceRoomTone,
                 EnhanceVoiceEq = EnhanceVoiceEq,
                 NormalizeLoudness = NormalizeLoudness,
@@ -2349,6 +2592,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         public bool EnableDeepFilterNet { get; set; }
 
         public bool EnableDeepFilterNetPostFilter { get; set; } = true;
+
+        public bool FallbackToFfmpegWhenAiFails { get; set; } = true;
 
         public bool ReduceRoomTone { get; set; }
 

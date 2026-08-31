@@ -204,6 +204,7 @@
                             BorderBrush="{StaticResource AccentBrush}"
                             Foreground="#07100E" />
                     <Button Click="CompareSelected_Click" Content="A/B 比較" />
+                    <Button Click="PreviewSelected_Click" Content="30秒試聽" />
                     <Button Click="OpenProcessedFile_Click" Content="開處理後檔" />
                     <Button Click="CancelProcessing_Click" Content="取消" />
                 </StackPanel>
@@ -452,6 +453,11 @@
                                   VerticalContentAlignment="Center"
                                   Content="DeepFilterNet PostFilter"
                                   IsChecked="{Binding EnableDeepFilterNetPostFilter, Mode=TwoWay}" />
+
+                        <CheckBox Margin="18,8,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="AI 失敗改用 FFmpeg"
+                                  IsChecked="{Binding FallbackToFfmpegWhenAiFails, Mode=TwoWay}" />
 
                         <TextBlock Margin="0,8,0,6"
                                    Text="{Binding DeepFilterNetPathText}"

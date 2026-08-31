@@ -23,6 +23,8 @@ release/
 **/.deepfilter_stage_*/
 .deepfilter_compare_*/
 **/.deepfilter_compare_*/
+.preview_stage_*/
+**/.preview_stage_*/
 
 # User and IDE files
 .agents/

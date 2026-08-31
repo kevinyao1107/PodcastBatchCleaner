@@ -52,7 +52,7 @@ public sealed class DeepFilterNetAudioProcessor
         startInfo.ArgumentList.Add(inputWavPath);
 
         using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("無法啟動 DeepFilterNet。");
+            ?? throw new InvalidOperationException("無法啟動 DeepFilterNet，請確認 deep-filter.exe 路徑正確，且沒有被防毒或系統權限阻擋。");
 
         TrySetBackgroundPriority(process);
 
@@ -75,11 +75,12 @@ public sealed class DeepFilterNetAudioProcessor
         if (process.ExitCode != 0)
         {
             var detail = string.IsNullOrWhiteSpace(error) ? output : error;
-            throw new InvalidOperationException($"DeepFilterNet 處理失敗，ExitCode={process.ExitCode}。{TrimMessage(detail)}");
+            throw new InvalidOperationException(
+                $"DeepFilterNet 處理失敗，ExitCode={process.ExitCode}。請確認 deep-filter.exe 是 Windows x64 版本，且輸入音檔可以轉成 WAV。{TrimMessage(detail)}");
         }
 
         return FindOutputPath(inputWavPath, outputFolder)
-            ?? throw new InvalidOperationException("DeepFilterNet 已完成，但找不到輸出 WAV。");
+            ?? throw new InvalidOperationException("DeepFilterNet 已完成，但找不到輸出 WAV。請確認 deep-filter.exe 版本是否支援 -o 輸出資料夾參數。");
     }
 
     private static string? FindOutputPath(string inputWavPath, string outputFolder)
