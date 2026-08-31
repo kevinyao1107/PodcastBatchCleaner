@@ -183,6 +183,12 @@ DeepFilterNet 不會包在此專案內，需要另外安裝或下載。設定方
 3. 視需要保留「DeepFilterNet PostFilter」，通常可以讓殘留噪音更少。
 4. 點選「處理選取」「全部輸出」或「A/B 比較」。
 
+如果把 `deep-filter.exe` 放在以下位置，程式啟動時會自動找到：
+
+```text
+tools/DeepFilterNet/deep-filter.exe
+```
+
 啟用後，程式會先把音檔暫時轉成 48 kHz mono WAV，交給 DeepFilterNet 處理，再套用靜音裁切、EQ、響度標準化、Limiter 與輸出格式設定。暫存檔會在處理結束後自動刪除。
 
 DeepFilterNet 比較適合處理背景噪音、風扇聲、環境底噪。若主要問題是房間反射或錄音太遠，它可能只能改善一部分，仍建議搭配「減少空間音」與「人聲增厚 EQ」微調。

@@ -5,6 +5,25 @@ namespace PodcastBatchCleaner.Core.Services;
 
 public sealed class DeepFilterNetAudioProcessor
 {
+    public static string? TryFindDeepFilterNet()
+    {
+        var fromPath = FindInPath("deep-filter.exe");
+        if (fromPath is not null)
+        {
+            return fromPath;
+        }
+
+        var candidates = new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "deep-filter.exe"),
+            Path.Combine(AppContext.BaseDirectory, "tools", "DeepFilterNet", "deep-filter.exe"),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "tools", "DeepFilterNet", "deep-filter.exe")),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "tools", "DeepFilterNet", "deep-filter.exe"))
+        };
+
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
     public async Task<string> ProcessAsync(
         string deepFilterPath,
         string inputWavPath,
@@ -122,5 +141,19 @@ public sealed class DeepFilterNetAudioProcessor
         catch (System.ComponentModel.Win32Exception)
         {
         }
+    }
+
+    private static string? FindInPath(string fileName)
+    {
+        var pathVariable = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(pathVariable))
+        {
+            return null;
+        }
+
+        return pathVariable
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(path => Path.Combine(path, fileName))
+            .FirstOrDefault(File.Exists);
     }
 }

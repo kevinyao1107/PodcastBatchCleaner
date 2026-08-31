@@ -42,3 +42,6 @@ release/
 # App output
 processed/
 **/processed/
+
+# Local third-party tools
+tools/DeepFilterNet/deep-filter.exe

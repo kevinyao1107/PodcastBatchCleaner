@@ -383,7 +383,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _ffmpegPath = FfmpegAudioProcessor.TryFindFfmpeg();
         }
 
+        if (string.IsNullOrWhiteSpace(_deepFilterNetPath) || !File.Exists(_deepFilterNetPath))
+        {
+            _deepFilterNetPath = DeepFilterNetAudioProcessor.TryFindDeepFilterNet();
+        }
+
         OnPropertyChanged(nameof(FfmpegPathText));
+        OnPropertyChanged(nameof(DeepFilterNetPathText));
 
         StatusText = _ffmpegPath is null
             ? "找不到 FFmpeg。播放可使用；輸出前請指定 ffmpeg.exe。"
