@@ -192,6 +192,8 @@ DeepFilterNet 不會包在此專案內，需要另外安裝或下載。設定方
 tools/DeepFilterNet/deep-filter.exe
 ```
 
+第一次使用或設定檔還沒有 DeepFilterNet 偏好時，程式找到這個路徑後會自動把 DeepFilterNet 設為預設 AI 工具。之後若手動取消勾選，程式會記住你的選擇。
+
 啟用後，程式會先把音檔暫時轉成 48 kHz mono WAV，交給 DeepFilterNet 處理，再套用靜音裁切、EQ、響度標準化、Limiter 與輸出格式設定。暫存檔會在處理結束後自動刪除。
 
 DeepFilterNet 比較適合處理背景噪音、風扇聲、環境底噪。若主要問題是房間反射或錄音太遠，它可能只能改善一部分，仍建議搭配「減少空間音」與「人聲增厚 EQ」微調。

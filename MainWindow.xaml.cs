@@ -36,6 +36,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string? _ffmpegPath;
     private bool _isDraggingPosition;
     private bool _isProcessing;
+    private bool _loadedDeepFilterNetPreference;
     private double _silenceSeconds = 0.1;
     private double _silenceThresholdDb = -35;
     private bool _enableDenoise = true;
@@ -391,9 +392,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _ffmpegPath = FfmpegAudioProcessor.TryFindFfmpeg();
         }
 
-        if (string.IsNullOrWhiteSpace(_deepFilterNetPath) || !File.Exists(_deepFilterNetPath))
+        var hadValidDeepFilterNetPath = !string.IsNullOrWhiteSpace(_deepFilterNetPath) && File.Exists(_deepFilterNetPath);
+        if (!hadValidDeepFilterNetPath)
         {
             _deepFilterNetPath = DeepFilterNetAudioProcessor.TryFindDeepFilterNet();
+        }
+
+        if (!_loadedDeepFilterNetPreference && !string.IsNullOrWhiteSpace(_deepFilterNetPath) && File.Exists(_deepFilterNetPath))
+        {
+            EnableDeepFilterNet = true;
         }
 
         OnPropertyChanged(nameof(FfmpegPathText));
@@ -2111,6 +2118,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             {
                 return;
             }
+
+            using var document = JsonDocument.Parse(json);
+            _loadedDeepFilterNetPreference = document.RootElement.TryGetProperty(nameof(AppSettings.EnableDeepFilterNet), out _);
 
             _currentFolder = settings.CurrentFolder;
             _outputFolder = settings.OutputFolder;
