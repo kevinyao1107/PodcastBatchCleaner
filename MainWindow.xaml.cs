@@ -109,6 +109,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ? "DeepFilterNet：尚未設定 deep-filter.exe"
         : $"DeepFilterNet：{_deepFilterNetPath}";
 
+    public string DeepFilterNetStatusText
+    {
+        get
+        {
+            if (!EnableDeepFilterNet)
+            {
+                return "AI 工具：已停用";
+            }
+
+            return string.IsNullOrWhiteSpace(_deepFilterNetPath) || !File.Exists(_deepFilterNetPath)
+                ? "AI 工具：未找到"
+                : "AI 工具：DeepFilterNet 已就緒";
+        }
+    }
+
     public string FfmpegPathText => _ffmpegPath is null
         ? "FFmpeg：尚未找到，請指定 ffmpeg.exe 後再輸出"
         : $"FFmpeg：{_ffmpegPath}";
@@ -200,7 +215,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool EnableDeepFilterNet
     {
         get => _enableDeepFilterNet;
-        set => SetField(ref _enableDeepFilterNet, value);
+        set
+        {
+            if (SetField(ref _enableDeepFilterNet, value))
+            {
+                OnPropertyChanged(nameof(DeepFilterNetStatusText));
+            }
+        }
     }
 
     public bool EnableDeepFilterNetPostFilter
@@ -405,6 +426,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         OnPropertyChanged(nameof(FfmpegPathText));
         OnPropertyChanged(nameof(DeepFilterNetPathText));
+        OnPropertyChanged(nameof(DeepFilterNetStatusText));
 
         StatusText = _ffmpegPath is null
             ? "找不到 FFmpeg。播放可使用；輸出前請指定 ffmpeg.exe。"
@@ -506,6 +528,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _deepFilterNetPath = dialog.FileName;
         EnableDeepFilterNet = true;
         OnPropertyChanged(nameof(DeepFilterNetPathText));
+        OnPropertyChanged(nameof(DeepFilterNetStatusText));
         StatusText = "已設定 DeepFilterNet。";
     }
 
@@ -514,6 +537,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _deepFilterNetPath = null;
         EnableDeepFilterNet = false;
         OnPropertyChanged(nameof(DeepFilterNetPathText));
+        OnPropertyChanged(nameof(DeepFilterNetStatusText));
         StatusText = "已清除 DeepFilterNet。";
     }
 
@@ -2166,6 +2190,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             OnPropertyChanged(nameof(OutroAudioText));
             OnPropertyChanged(nameof(CoverImageText));
             OnPropertyChanged(nameof(DeepFilterNetPathText));
+            OnPropertyChanged(nameof(DeepFilterNetStatusText));
         }
         catch (JsonException)
         {

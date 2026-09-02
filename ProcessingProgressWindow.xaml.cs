@@ -14,8 +14,9 @@ public partial class ProcessingProgressWindow : Window
     public void SetProgress(string fileName, double percent)
     {
         var clampedPercent = Math.Clamp(percent, 0, 100);
-        StatusText.Text = "正在處理音檔";
-        FileText.Text = fileName;
+        var (stage, displayFileName) = SplitProgressText(fileName);
+        StatusText.Text = stage;
+        FileText.Text = displayFileName;
         Progress.Value = clampedPercent;
         PercentText.Text = $"{clampedPercent:0}%";
     }
@@ -29,5 +30,21 @@ public partial class ProcessingProgressWindow : Window
     {
         SetStatus("正在取消...");
         CancelRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static (string Stage, string FileName) SplitProgressText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return ("正在處理音檔", string.Empty);
+        }
+
+        var separatorIndex = text.IndexOf('：');
+        if (separatorIndex <= 0 || separatorIndex >= text.Length - 1)
+        {
+            return ("正在處理音檔", text);
+        }
+
+        return (text[..separatorIndex], text[(separatorIndex + 1)..]);
     }
 }

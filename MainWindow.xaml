@@ -118,6 +118,23 @@
             <Setter Property="Background" Value="{StaticResource BorderBrushDark}" />
         </Style>
 
+        <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,18,0,10" />
+        </Style>
+
+        <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+            <Setter Property="Margin" Value="0,12,0,6" />
+        </Style>
+
+        <Style x:Key="MetaTextStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Margin" Value="0,6,0,0" />
+        </Style>
+
         <Style TargetType="GridViewColumnHeader">
             <Setter Property="Background" Value="#0F141E" />
             <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
@@ -177,13 +194,13 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <StackPanel Orientation="Horizontal">
+                <WrapPanel>
                     <Button Click="SelectFolder_Click" Content="選取資料夾" />
                     <Button Click="ChooseOutputFolder_Click" Content="輸出位置" />
                     <Button Click="OpenOutputFolder_Click" Content="開啟輸出" />
                     <Button Click="ChooseAiAudioFolder_Click" Content="AI 音檔資料夾" />
                     <Button Click="ChooseFfmpeg_Click" Content="指定 FFmpeg" />
-                </StackPanel>
+                </WrapPanel>
 
                 <TextBlock Grid.Column="1"
                            Margin="8,0"
@@ -192,7 +209,7 @@
                            TextTrimming="CharacterEllipsis"
                            Foreground="{StaticResource MutedTextBrush}" />
 
-                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <WrapPanel Grid.Column="2" HorizontalAlignment="Right">
                     <Button Click="ProcessSelected_Click"
                             Content="處理選取"
                             Background="{StaticResource AccentBrush}"
@@ -207,7 +224,7 @@
                     <Button Click="PreviewSelected_Click" Content="30秒試聽" />
                     <Button Click="OpenProcessedFile_Click" Content="開處理後檔" />
                     <Button Click="CancelProcessing_Click" Content="取消" />
-                </StackPanel>
+                </WrapPanel>
             </Grid>
         </Border>
 
@@ -376,11 +393,12 @@
                         </Style>
                     </ScrollViewer.Resources>
                     <StackPanel Margin="0,0,12,0">
-                        <TextBlock FontSize="16"
+                        <TextBlock FontSize="18"
                                    FontWeight="SemiBold"
-                                   Text="處理設定" />
+                                   Text="控制面板" />
 
-                        <WrapPanel Margin="0,12,0,2">
+                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="工作流程" />
+                        <WrapPanel Margin="0,0,0,2">
                             <Button Margin="0,0,8,8"
                                     Click="ApplyPodcastPreset_Click"
                                     Content="一般 Podcast" />
@@ -395,13 +413,11 @@
                                     Content="只剪輯" />
                         </WrapPanel>
 
-                        <TextBlock Margin="0,18,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="空拍超過多久刪除（0.1 - 1.0 秒）" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="空拍超過多久刪除（0.1 - 1.0 秒）" />
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="80" />
+                                <ColumnDefinition Width="88" />
                             </Grid.ColumnDefinitions>
                             <Slider x:Name="SilenceSecondsSlider"
                                     VerticalAlignment="Center"
@@ -419,13 +435,11 @@
                                      Text="{Binding SilenceSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
                         </Grid>
 
-                        <TextBlock Margin="0,14,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="空拍判定門檻 dBFS" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="空拍判定門檻 dBFS" />
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="80" />
+                                <ColumnDefinition Width="88" />
                             </Grid.ColumnDefinitions>
                             <Slider VerticalAlignment="Center"
                                     Minimum="-80"
@@ -439,7 +453,8 @@
                                      Text="{Binding SilenceThresholdDb, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0}" />
                         </Grid>
 
-                        <CheckBox Margin="0,16,0,0"
+                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="AI 降噪" />
+                        <CheckBox Margin="0,0,0,0"
                                   VerticalContentAlignment="Center"
                                   Content="使用 AI 處理後音檔"
                                   IsChecked="{Binding UseAiProcessedAudio, Mode=TwoWay}" />
@@ -459,10 +474,10 @@
                                   Content="AI 失敗改用 FFmpeg"
                                   IsChecked="{Binding FallbackToFfmpegWhenAiFails, Mode=TwoWay}" />
 
-                        <TextBlock Margin="0,8,0,6"
-                                   Text="{Binding DeepFilterNetPathText}"
-                                   TextWrapping="Wrap"
-                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock Style="{StaticResource MetaTextStyle}"
+                                   Text="{Binding DeepFilterNetStatusText}" />
+                        <TextBlock Style="{StaticResource MetaTextStyle}"
+                                   Text="{Binding DeepFilterNetPathText}" />
                         <StackPanel Orientation="Horizontal">
                             <Button Click="ChooseDeepFilterNet_Click" Content="指定 DFN" />
                             <Button Margin="8,0,0,0"
@@ -470,7 +485,8 @@
                                     Content="清除" />
                         </StackPanel>
 
-                        <CheckBox Margin="0,10,0,0"
+                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="聲音補強" />
+                        <CheckBox Margin="0,0,0,0"
                                   VerticalContentAlignment="Center"
                                   Content="統一降噪"
                                   IsChecked="{Binding EnableDenoise, Mode=TwoWay}" />
@@ -495,154 +511,11 @@
                                   Content="防爆音 Limiter"
                                   IsChecked="{Binding EnableLimiter, Mode=TwoWay}" />
 
-                        <Separator Margin="0,20" />
-
-                        <TextBlock FontSize="16"
-                                   FontWeight="SemiBold"
-                                   Text="統整輸出" />
-
-                        <CheckBox Margin="0,12,0,0"
-                                  VerticalContentAlignment="Center"
-                                  Content="統整成單一檔案"
-                                  IsChecked="{Binding MergeSegments, Mode=TwoWay}" />
-
-                        <TextBlock Margin="0,14,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="段落間空白秒數（0 - 10 秒）" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="音量增益 dB" />
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="80" />
-                            </Grid.ColumnDefinitions>
-                            <Slider VerticalAlignment="Center"
-                                    Minimum="0"
-                                    Maximum="10"
-                                    TickFrequency="0.1"
-                                    SmallChange="0.1"
-                                    LargeChange="1"
-                                    IsSnapToTickEnabled="True"
-                                    Value="{Binding MergeGapSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                            <TextBox Grid.Column="1"
-                                     VerticalAlignment="Center"
-                                     HorizontalContentAlignment="Right"
-                                     Margin="8,0,0,0"
-                                     Text="{Binding MergeGapSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
-                        </Grid>
-
-                        <TextBlock Margin="0,14,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="輸出格式" />
-                        <ComboBox ItemsSource="{Binding OutputFormats}"
-                                  SelectedItem="{Binding SelectedOutputFormat, Mode=TwoWay}"
-                                  DisplayMemberPath="DisplayName" />
-
-                        <TextBlock Margin="0,14,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="統整輸出檔名" />
-                        <TextBox Text="{Binding MergedOutputFileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-
-                        <TextBlock Margin="0,16,0,6"
-                                   FontWeight="SemiBold"
-                                   Text="節目資訊" />
-
-                        <TextBlock Margin="0,10,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="標題" />
-                        <TextBox Text="{Binding PodcastTitle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-
-                        <TextBlock Margin="0,10,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="作者 / 主持人" />
-                        <TextBox Text="{Binding PodcastArtist, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-
-                        <TextBlock Margin="0,10,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="節目 / 專輯名稱" />
-                        <TextBox Text="{Binding PodcastAlbum, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-
-                        <TextBlock Margin="0,12,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="{Binding CoverImageText}" />
-                        <StackPanel Orientation="Horizontal">
-                            <Button Click="ChooseCoverImage_Click" Content="選封面" />
-                            <Button Margin="8,0,0,0"
-                                    Click="ClearCoverImage_Click"
-                                    Content="清除封面" />
-                        </StackPanel>
-
-                        <TextBlock Margin="0,16,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="{Binding IntroAudioText}" />
-                        <StackPanel Orientation="Horizontal">
-                            <Button Click="ChooseIntroAudio_Click" Content="選片頭" />
-                            <Button Margin="8,0,0,0"
-                                    Click="ClearIntroAudio_Click"
-                                    Content="清除片頭" />
-                        </StackPanel>
-
-                        <TextBlock Margin="0,12,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="片頭淡入秒數（0 - 10 秒）" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="80" />
-                            </Grid.ColumnDefinitions>
-                            <Slider VerticalAlignment="Center"
-                                    Minimum="0"
-                                    Maximum="10"
-                                    TickFrequency="0.1"
-                                    SmallChange="0.1"
-                                    LargeChange="1"
-                                    IsSnapToTickEnabled="True"
-                                    Value="{Binding IntroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                            <TextBox Grid.Column="1"
-                                     VerticalAlignment="Center"
-                                     HorizontalContentAlignment="Right"
-                                     Margin="8,0,0,0"
-                                     Text="{Binding IntroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
-                        </Grid>
-
-                        <TextBlock Margin="0,16,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="{Binding OutroAudioText}" />
-                        <StackPanel Orientation="Horizontal">
-                            <Button Click="ChooseOutroAudio_Click" Content="選片尾" />
-                            <Button Margin="8,0,0,0"
-                                    Click="ClearOutroAudio_Click"
-                                    Content="清除片尾" />
-                        </StackPanel>
-
-                        <TextBlock Margin="0,12,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="片尾淡出秒數（0 - 10 秒）" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="80" />
-                            </Grid.ColumnDefinitions>
-                            <Slider VerticalAlignment="Center"
-                                    Minimum="0"
-                                    Maximum="10"
-                                    TickFrequency="0.1"
-                                    SmallChange="0.1"
-                                    LargeChange="1"
-                                    IsSnapToTickEnabled="True"
-                                    Value="{Binding OutroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                            <TextBox Grid.Column="1"
-                                     VerticalAlignment="Center"
-                                     HorizontalContentAlignment="Right"
-                                     Margin="8,0,0,0"
-                                     Text="{Binding OutroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
-                        </Grid>
-
-                        <TextBlock Margin="0,18,0,6"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="音量增益 dB" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="80" />
+                                <ColumnDefinition Width="88" />
                             </Grid.ColumnDefinitions>
                             <Slider VerticalAlignment="Center"
                                     Minimum="-24"
@@ -659,13 +532,122 @@
                                      Text="{Binding VolumeGainDb, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
                         </Grid>
 
-                        <Separator Margin="0,20" />
+                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="統整輸出" />
+                        <CheckBox Margin="0,0,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="統整成單一檔案"
+                                  IsChecked="{Binding MergeSegments, Mode=TwoWay}" />
 
-                        <TextBlock FontSize="16"
-                                   FontWeight="SemiBold"
-                                   Text="播放" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="段落間空白秒數（0 - 10 秒）" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <Slider VerticalAlignment="Center"
+                                    Minimum="0"
+                                    Maximum="10"
+                                    TickFrequency="0.1"
+                                    SmallChange="0.1"
+                                    LargeChange="1"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding MergeGapSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <TextBox Grid.Column="1"
+                                     VerticalAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="8,0,0,0"
+                                     Text="{Binding MergeGapSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
+                        </Grid>
 
-                        <TextBlock Margin="0,12,0,6"
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="輸出格式" />
+                        <ComboBox ItemsSource="{Binding OutputFormats}"
+                                  SelectedItem="{Binding SelectedOutputFormat, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="統整輸出檔名" />
+                        <TextBox Text="{Binding MergedOutputFileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="標題" />
+                        <TextBox Text="{Binding PodcastTitle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="作者 / 主持人" />
+                        <TextBox Text="{Binding PodcastArtist, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="節目 / 專輯名稱" />
+                        <TextBox Text="{Binding PodcastAlbum, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}"
+                                   Text="{Binding CoverImageText}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Click="ChooseCoverImage_Click" Content="選封面" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearCoverImage_Click"
+                                    Content="清除封面" />
+                        </StackPanel>
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}"
+                                   Text="{Binding IntroAudioText}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Click="ChooseIntroAudio_Click" Content="選片頭" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearIntroAudio_Click"
+                                    Content="清除片頭" />
+                        </StackPanel>
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="片頭淡入秒數（0 - 10 秒）" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <Slider VerticalAlignment="Center"
+                                    Minimum="0"
+                                    Maximum="10"
+                                    TickFrequency="0.1"
+                                    SmallChange="0.1"
+                                    LargeChange="1"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding IntroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <TextBox Grid.Column="1"
+                                     VerticalAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="8,0,0,0"
+                                     Text="{Binding IntroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
+                        </Grid>
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}"
+                                   Text="{Binding OutroAudioText}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Click="ChooseOutroAudio_Click" Content="選片尾" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearOutroAudio_Click"
+                                    Content="清除片尾" />
+                        </StackPanel>
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="片尾淡出秒數（0 - 10 秒）" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <Slider VerticalAlignment="Center"
+                                    Minimum="0"
+                                    Maximum="10"
+                                    TickFrequency="0.1"
+                                    SmallChange="0.1"
+                                    LargeChange="1"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding OutroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <TextBox Grid.Column="1"
+                                     VerticalAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="8,0,0,0"
+                                     Text="{Binding OutroFadeSeconds, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
+                        </Grid>
+
+                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="播放 / 試聽" />
+
+                        <TextBlock Margin="0,0,0,6"
                                    Text="{Binding SelectedFileText}"
                                    TextWrapping="Wrap"
                                    Foreground="{StaticResource MutedTextBrush}" />
@@ -700,23 +682,16 @@
                             <TextBlock Grid.Column="1" Text="{Binding PlaybackDurationText}" Foreground="{StaticResource MutedTextBrush}" />
                         </Grid>
 
-                        <Separator Margin="0,20" />
-
-                        <TextBlock FontSize="16"
-                                   FontWeight="SemiBold"
-                                   Text="工具狀態" />
-                        <TextBlock Margin="0,10,0,0"
+                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="工具狀態" />
+                        <TextBlock Style="{StaticResource MetaTextStyle}"
                                    Text="{Binding FfmpegPathText}"
-                                   TextWrapping="Wrap"
-                                   Foreground="{StaticResource MutedTextBrush}" />
-                        <TextBlock Margin="0,10,0,0"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Style="{StaticResource MetaTextStyle}"
                                    Text="{Binding OutputFolderText}"
-                                   TextWrapping="Wrap"
-                                   Foreground="{StaticResource MutedTextBrush}" />
-                        <TextBlock Margin="0,10,0,0"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Style="{StaticResource MetaTextStyle}"
                                    Text="{Binding AiAudioFolderText}"
-                                   TextWrapping="Wrap"
-                                   Foreground="{StaticResource MutedTextBrush}" />
+                                   TextWrapping="Wrap" />
                     </StackPanel>
                 </ScrollViewer>
             </Border>
