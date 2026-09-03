@@ -67,6 +67,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _processingProgressText = string.Empty;
     private double _processingProgress;
     private bool _isProgressVisible;
+    private bool _isAnalyzing;
+    private string _analysisText = "尚未分析。";
     private string _statusText = "請先選取資料夾。";
     private string _playbackPositionText = "00:00";
     private string _playbackDurationText = "00:00";
@@ -174,6 +176,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         get => _isProgressVisible;
         set => SetField(ref _isProgressVisible, value);
+    }
+
+    public bool IsAnalyzing
+    {
+        get => _isAnalyzing;
+        set => SetField(ref _isAnalyzing, value);
+    }
+
+    public string AnalysisText
+    {
+        get => _analysisText;
+        set => SetField(ref _analysisText, value);
     }
 
     public string PlaybackPositionText
@@ -726,6 +740,36 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         await ProcessPreviewAsync(item);
+    }
+
+    private async void AnalyzeOriginal_Click(object sender, RoutedEventArgs e)
+    {
+        var item = GetSelectedAudioFile();
+        if (item is null)
+        {
+            StatusText = "請先選取要分析的音檔。";
+            return;
+        }
+
+        await AnalyzeAudioAsync(item, item.FilePath, "原始音檔");
+    }
+
+    private async void AnalyzeProcessed_Click(object sender, RoutedEventArgs e)
+    {
+        var item = GetSelectedAudioFile();
+        if (item is null)
+        {
+            StatusText = "請先選取要分析的音檔。";
+            return;
+        }
+
+        if (!item.HasProcessedFile || item.ProcessedPath is null)
+        {
+            StatusText = "這個音檔還沒有處理後版本。";
+            return;
+        }
+
+        await AnalyzeAudioAsync(item, item.ProcessedPath, "處理後音檔");
     }
 
     private void MoveSelectedUp_Click(object sender, RoutedEventArgs e)
@@ -2108,11 +2152,93 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         System.Windows.MessageBox.Show(this, message.ToString(), "處理摘要", MessageBoxButton.OK, icon);
     }
 
+    private static string FormatAnalysisText(string label, string path, AudioQualityAnalysis analysis)
+    {
+        var peakWarning = analysis.MaxVolumeDb is >= -0.2
+            ? "，接近爆音"
+            : string.Empty;
+
+        return new StringBuilder()
+            .AppendLine($"{label}：{Path.GetFileName(path)}")
+            .AppendLine($"長度：{FormatNullableDuration(analysis.Duration)}")
+            .AppendLine($"平均音量：{FormatDb(analysis.MeanVolumeDb)}")
+            .AppendLine($"Peak：{FormatDb(analysis.MaxVolumeDb)}{peakWarning}")
+            .AppendLine($"LUFS：{FormatLufs(analysis.IntegratedLufs)}")
+            .AppendLine($"True Peak：{FormatDbfs(analysis.TruePeakDbfs)}")
+            .ToString()
+            .TrimEnd();
+    }
+
+    private static string FormatNullableDuration(TimeSpan? duration)
+    {
+        return duration is null ? "無法判定" : FormatTime(duration.Value);
+    }
+
+    private static string FormatDb(double? value)
+    {
+        return value is null ? "無法判定" : $"{value.Value:0.0} dB";
+    }
+
+    private static string FormatDbfs(double? value)
+    {
+        return value is null ? "無法判定" : $"{value.Value:0.0} dBFS";
+    }
+
+    private static string FormatLufs(double? value)
+    {
+        return value is null ? "無法判定" : $"{value.Value:0.0} LUFS";
+    }
+
     private void AudioList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         _selectedFile = AudioList.SelectedItem as AudioFileItem;
         OnPropertyChanged(nameof(SelectedFileText));
         OpenSelectedForPlayback(autoPlay: false);
+    }
+
+    private async Task AnalyzeAudioAsync(AudioFileItem item, string path, string label)
+    {
+        if (_isAnalyzing)
+        {
+            StatusText = "目前正在分析音檔。";
+            return;
+        }
+
+        var ffmpegPath = _ffmpegPath;
+        if (ffmpegPath is null || !File.Exists(ffmpegPath))
+        {
+            StatusText = "請先指定 ffmpeg.exe。";
+            return;
+        }
+
+        if (!File.Exists(path))
+        {
+            StatusText = "找不到要分析的音檔。";
+            return;
+        }
+
+        try
+        {
+            IsAnalyzing = true;
+            AnalysisText = $"正在分析 {label}：{Path.GetFileName(path)}";
+            StatusText = $"正在分析：{Path.GetFileName(path)}";
+
+            var duration = string.Equals(path, item.FilePath, StringComparison.OrdinalIgnoreCase)
+                ? item.Duration
+                : null;
+            var analysis = await _processor.AnalyzeQualityAsync(ffmpegPath, path, duration);
+            AnalysisText = FormatAnalysisText(label, path, analysis);
+            StatusText = $"分析完成：{Path.GetFileName(path)}";
+        }
+        catch (Exception ex)
+        {
+            AnalysisText = $"分析失敗：{ex.Message}";
+            StatusText = $"分析失敗：{ex.Message}";
+        }
+        finally
+        {
+            IsAnalyzing = false;
+        }
     }
 
     private string GetProcessingInputPath(AudioFileItem item)

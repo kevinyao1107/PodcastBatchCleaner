@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Text.RegularExpressions;
 
 namespace PodcastBatchCleaner.Core.Services;
 
@@ -29,6 +30,13 @@ public sealed record AudioOutputFormat(
     string DisplayName,
     string Extension,
     string AudioCodec);
+
+public sealed record AudioQualityAnalysis(
+    TimeSpan? Duration,
+    double? MeanVolumeDb,
+    double? MaxVolumeDb,
+    double? IntegratedLufs,
+    double? TruePeakDbfs);
 
 public sealed class FfmpegAudioProcessor
 {
@@ -391,6 +399,54 @@ public sealed class FfmpegAudioProcessor
             : null;
     }
 
+    public async Task<AudioQualityAnalysis> AnalyzeQualityAsync(
+        string ffmpegPath,
+        string inputPath,
+        TimeSpan? duration = null,
+        CancellationToken cancellationToken = default)
+    {
+        duration ??= await ProbeDurationAsync(ffmpegPath, inputPath, cancellationToken).ConfigureAwait(false);
+
+        var volumeOutput = await RunAnalysisAsync(
+            ffmpegPath,
+            [
+                "-hide_banner",
+                "-nostdin",
+                "-nostats",
+                "-i",
+                inputPath,
+                "-af",
+                "volumedetect",
+                "-f",
+                "null",
+                "-"
+            ],
+            cancellationToken).ConfigureAwait(false);
+
+        var loudnessOutput = await RunAnalysisAsync(
+            ffmpegPath,
+            [
+                "-hide_banner",
+                "-nostdin",
+                "-nostats",
+                "-i",
+                inputPath,
+                "-filter_complex",
+                "ebur128=peak=true",
+                "-f",
+                "null",
+                "-"
+            ],
+            cancellationToken).ConfigureAwait(false);
+
+        return new AudioQualityAnalysis(
+            duration,
+            ParseMetric(volumeOutput, @"mean_volume:\s*(?<value>-?\d+(?:\.\d+)?)\s*dB"),
+            ParseMetric(volumeOutput, @"max_volume:\s*(?<value>-?\d+(?:\.\d+)?)\s*dB"),
+            ParseLastMetric(loudnessOutput, @"I:\s*(?<value>-?\d+(?:\.\d+)?)\s*LUFS"),
+            ParseLastMetric(loudnessOutput, @"Peak:\s*(?<value>-?\d+(?:\.\d+)?)\s*dBFS"));
+    }
+
     public static string MakeOutputPath(
         string inputPath,
         string outputFolder,
@@ -723,6 +779,73 @@ public sealed class FfmpegAudioProcessor
         {
             throw new InvalidOperationException($"FFmpeg 處理失敗，ExitCode={process.ExitCode}");
         }
+    }
+
+    private static async Task<string> RunAnalysisAsync(
+        string ffmpegPath,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true
+        };
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("無法啟動 FFmpeg。");
+
+        SetBackgroundPriority(process);
+
+        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            KillProcessTree(process);
+            throw;
+        }
+
+        var output = await outputTask.ConfigureAwait(false);
+        var error = await errorTask.ConfigureAwait(false);
+        var combinedOutput = $"{output}{Environment.NewLine}{error}";
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"FFmpeg 分析失敗，ExitCode={process.ExitCode}");
+        }
+
+        return combinedOutput;
+    }
+
+    private static double? ParseMetric(string text, string pattern)
+    {
+        var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
+        return match.Success
+            && double.TryParse(match.Groups["value"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+                ? value
+                : null;
+    }
+
+    private static double? ParseLastMetric(string text, string pattern)
+    {
+        var matches = Regex.Matches(text, pattern, RegexOptions.IgnoreCase);
+        return matches.Count > 0
+            && double.TryParse(matches[matches.Count - 1].Groups["value"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+                ? value
+                : null;
     }
 
     private static async Task ReadProgressAsync(
