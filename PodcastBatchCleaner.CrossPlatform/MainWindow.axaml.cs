@@ -357,6 +357,8 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
             NormalizeLoudness,
             EnableLimiter,
             VolumeGainDb,
+            FfmpegAudioProcessor.KeepOriginalChannelMode,
+            0,
             _outputFolder);
 
         try

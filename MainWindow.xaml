@@ -536,6 +536,32 @@
                         </WrapPanel>
 
                         <TextBlock Style="{StaticResource SectionTitleStyle}" Text="聲音補強" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="聲道模式" />
+                        <ComboBox ItemsSource="{Binding ChannelModes}"
+                                  SelectedItem="{Binding SelectedChannelMode, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="左右平衡（-1 左 / 0 中 / 1 右）" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <Slider VerticalAlignment="Center"
+                                    Minimum="-1"
+                                    Maximum="1"
+                                    TickFrequency="0.1"
+                                    SmallChange="0.1"
+                                    LargeChange="0.25"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding StereoBalance, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <TextBox Grid.Column="1"
+                                     VerticalAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="8,0,0,0"
+                                     Text="{Binding StereoBalance, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.00}" />
+                        </Grid>
+
                         <CheckBox Margin="0,0,0,0"
                                   VerticalContentAlignment="Center"
                                   Content="統一降噪"

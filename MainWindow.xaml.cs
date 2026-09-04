@@ -62,7 +62,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _podcastArtist = string.Empty;
     private string _podcastAlbum = string.Empty;
     private AudioOutputFormat _selectedOutputFormat = FfmpegAudioProcessor.OutputFormats[0];
+    private AudioChannelMode _selectedChannelMode = FfmpegAudioProcessor.DefaultPodcastChannelMode;
     private double _volumeGainDb;
+    private double _stereoBalance;
     private int _playbackSourceIndex;
     private string _currentProcessingFileText = string.Empty;
     private string _processingProgressText = string.Empty;
@@ -95,6 +97,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public ObservableCollection<AudioFileItem> AudioFiles { get; } = [];
 
     public IReadOnlyList<AudioOutputFormat> OutputFormats => FfmpegAudioProcessor.OutputFormats;
+
+    public IReadOnlyList<AudioChannelMode> ChannelModes => FfmpegAudioProcessor.ChannelModes;
 
     public string CurrentFolderText => _currentFolder is null
         ? "尚未選取資料夾"
@@ -335,10 +339,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         set => SetField(ref _selectedOutputFormat, value);
     }
 
+    public AudioChannelMode SelectedChannelMode
+    {
+        get => _selectedChannelMode;
+        set => SetField(ref _selectedChannelMode, value);
+    }
+
     public double VolumeGainDb
     {
         get => _volumeGainDb;
         set => SetField(ref _volumeGainDb, Math.Clamp(Math.Round(value, 1), -24, 24));
+    }
+
+    public double StereoBalance
+    {
+        get => _stereoBalance;
+        set => SetField(ref _stereoBalance, Math.Clamp(Math.Round(value, 2), -1, 1));
     }
 
     public int PlaybackSourceIndex
@@ -934,6 +950,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             NormalizeLoudness,
             EnableLimiter,
             VolumeGainDb,
+            SelectedChannelMode,
+            StereoBalance,
             _outputFolder);
 
         var progressWindow = new ProcessingProgressWindow
@@ -1676,6 +1694,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 NormalizeLoudness,
                 EnableLimiter,
                 VolumeGainDb,
+                SelectedChannelMode,
+                StereoBalance,
                 previewFolder);
 
             var outputPath = FfmpegAudioProcessor.MakeOutputPath(
@@ -2007,7 +2027,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     enhanceVoiceEq: false,
                     normalizeLoudness: false,
                     enableLimiter: false,
-                    volumeGainDb: 0))
+                    volumeGainDb: 0,
+                    FfmpegAudioProcessor.KeepOriginalChannelMode))
         ];
     }
 
@@ -2020,7 +2041,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         bool enhanceVoiceEq,
         bool normalizeLoudness,
         bool enableLimiter,
-        double volumeGainDb)
+        double volumeGainDb,
+        AudioChannelMode? channelMode = null)
     {
         return new AudioProcessingOptions(
             silenceSeconds,
@@ -2032,6 +2054,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             normalizeLoudness,
             enableLimiter,
             volumeGainDb,
+            channelMode ?? FfmpegAudioProcessor.DefaultPodcastChannelMode,
+            0,
             _outputFolder ?? string.Empty);
     }
 
@@ -2338,10 +2362,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             PodcastArtist = settings.PodcastArtist ?? string.Empty;
             PodcastAlbum = settings.PodcastAlbum ?? string.Empty;
             VolumeGainDb = settings.VolumeGainDb;
+            StereoBalance = settings.StereoBalance;
 
             SelectedOutputFormat = FfmpegAudioProcessor.OutputFormats.FirstOrDefault(format =>
                     string.Equals(format.Extension, settings.OutputFormatExtension, StringComparison.OrdinalIgnoreCase))
                 ?? FfmpegAudioProcessor.OutputFormats[0];
+            SelectedChannelMode = FfmpegAudioProcessor.ChannelModes.FirstOrDefault(mode =>
+                    string.Equals(mode.Value, settings.ChannelModeValue, StringComparison.OrdinalIgnoreCase))
+                ?? FfmpegAudioProcessor.DefaultPodcastChannelMode;
 
             OnPropertyChanged(nameof(CurrentFolderText));
             OnPropertyChanged(nameof(OutputFolderText));
@@ -2402,7 +2430,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 PodcastArtist = PodcastArtist,
                 PodcastAlbum = PodcastAlbum,
                 OutputFormatExtension = SelectedOutputFormat.Extension,
-                VolumeGainDb = VolumeGainDb
+                VolumeGainDb = VolumeGainDb,
+                ChannelModeValue = SelectedChannelMode.Value,
+                StereoBalance = StereoBalance
             };
 
             var json = JsonSerializer.Serialize(settings, SettingsJsonOptions);
@@ -2821,5 +2851,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         public string OutputFormatExtension { get; set; } = ".m4a";
 
         public double VolumeGainDb { get; set; }
+
+        public string ChannelModeValue { get; set; } = "center_stereo";
+
+        public double StereoBalance { get; set; }
     }
 }

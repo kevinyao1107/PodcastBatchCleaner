@@ -15,6 +15,8 @@ public sealed record AudioProcessingOptions(
     bool NormalizeLoudness,
     bool EnableLimiter,
     double VolumeGainDb,
+    AudioChannelMode ChannelMode,
+    double StereoBalance,
     string OutputFolder);
 
 public sealed record AudioProcessingProgress(
@@ -31,6 +33,10 @@ public sealed record AudioOutputFormat(
     string DisplayName,
     string Extension,
     string AudioCodec);
+
+public sealed record AudioChannelMode(
+    string DisplayName,
+    string Value);
 
 public sealed record AudioQualityAnalysis(
     TimeSpan? Duration,
@@ -52,6 +58,20 @@ public sealed class FfmpegAudioProcessor
         new("MP3", ".mp3", "libmp3lame"),
         new("WAV", ".wav", "pcm_s16le")
     ];
+
+    public static IReadOnlyList<AudioChannelMode> ChannelModes { get; } =
+    [
+        new("左右混合置中", "center_stereo"),
+        new("轉單聲道 Mono", "mono"),
+        new("保持原聲道", "keep"),
+        new("左聲道為主", "left_only"),
+        new("右聲道為主", "right_only"),
+        new("左右平衡調整", "balance")
+    ];
+
+    public static AudioChannelMode DefaultPodcastChannelMode => ChannelModes[0];
+
+    public static AudioChannelMode KeepOriginalChannelMode => ChannelModes[2];
 
     public static IReadOnlyCollection<string> AudioExtensions => SupportedExtensions;
 
@@ -115,10 +135,11 @@ public sealed class FfmpegAudioProcessor
             startInfo.ArgumentList.Add(sampleRate.Value.ToString(CultureInfo.InvariantCulture));
         }
 
-        if (channels is not null)
+        var outputChannels = ResolveOutputChannels(options.ChannelMode, channels);
+        if (outputChannels is not null)
         {
             startInfo.ArgumentList.Add("-ac");
-            startInfo.ArgumentList.Add(channels.Value.ToString(CultureInfo.InvariantCulture));
+            startInfo.ArgumentList.Add(outputChannels.Value.ToString(CultureInfo.InvariantCulture));
         }
 
         if (!string.IsNullOrWhiteSpace(audioCodec))
@@ -581,6 +602,8 @@ public sealed class FfmpegAudioProcessor
                 $"silenceremove=start_periods=1:start_duration={silenceSeconds:0.0}:start_threshold={threshold:0.#}dB:stop_periods=-1:stop_duration={silenceSeconds:0.0}:stop_threshold={threshold:0.#}dB")
         };
 
+        AddChannelFilters(filters, options.ChannelMode, options.StereoBalance);
+
         if (options.EnableDenoise)
         {
             filters.Add("afftdn=nf=-25");
@@ -629,6 +652,53 @@ public sealed class FfmpegAudioProcessor
         }
 
         return string.Join(",", filters);
+    }
+
+    private static void AddChannelFilters(List<string> filters, AudioChannelMode channelMode, double stereoBalance)
+    {
+        switch (channelMode.Value)
+        {
+            case "mono":
+                filters.Add("aformat=channel_layouts=stereo");
+                filters.Add("pan=mono|c0=0.5*c0+0.5*c1");
+                break;
+            case "center_stereo":
+                filters.Add("aformat=channel_layouts=stereo");
+                filters.Add("pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1");
+                break;
+            case "left_only":
+                filters.Add("aformat=channel_layouts=stereo");
+                filters.Add("pan=stereo|c0=c0|c1=c0");
+                break;
+            case "right_only":
+                filters.Add("aformat=channel_layouts=stereo");
+                filters.Add("pan=stereo|c0=c1|c1=c1");
+                break;
+            case "balance":
+                filters.Add("aformat=channel_layouts=stereo");
+                var balance = Math.Clamp(stereoBalance, -1, 1);
+                var leftGain = balance <= 0 ? 1 : 1 - balance;
+                var rightGain = balance >= 0 ? 1 : 1 + balance;
+                filters.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"pan=stereo|c0={leftGain:0.###}*c0|c1={rightGain:0.###}*c1"));
+                break;
+        }
+    }
+
+    private static int? ResolveOutputChannels(AudioChannelMode channelMode, int? requestedChannels)
+    {
+        if (requestedChannels is not null)
+        {
+            return requestedChannels;
+        }
+
+        return channelMode.Value switch
+        {
+            "mono" => 1,
+            "center_stereo" or "left_only" or "right_only" or "balance" => 2,
+            _ => null
+        };
     }
 
     private static async Task ReadOutputAsync(
