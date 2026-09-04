@@ -46,6 +46,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _fallbackToFfmpegWhenAiFails = true;
     private string? _deepFilterNetPath;
     private bool _reduceRoomTone;
+    private bool _reduceReverb;
     private bool _enhanceVoiceEq;
     private bool _normalizeLoudness = true;
     private bool _enableLimiter = true;
@@ -256,6 +257,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         set => SetField(ref _reduceRoomTone, value);
     }
 
+    public bool ReduceReverb
+    {
+        get => _reduceReverb;
+        set => SetField(ref _reduceReverb, value);
+    }
+
     public bool EnhanceVoiceEq
     {
         get => _enhanceVoiceEq;
@@ -349,6 +356,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             silenceThresholdDb: -35,
             enableDenoise: true,
             reduceRoomTone: true,
+            reduceReverb: false,
             enhanceVoiceEq: true,
             normalizeLoudness: true,
             enableLimiter: true,
@@ -363,6 +371,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             silenceThresholdDb: -34,
             enableDenoise: true,
             reduceRoomTone: true,
+            reduceReverb: true,
             enhanceVoiceEq: false,
             normalizeLoudness: true,
             enableLimiter: true,
@@ -377,6 +386,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             silenceThresholdDb: -36,
             enableDenoise: true,
             reduceRoomTone: true,
+            reduceReverb: false,
             enhanceVoiceEq: true,
             normalizeLoudness: true,
             enableLimiter: true,
@@ -391,6 +401,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             silenceThresholdDb: -35,
             enableDenoise: false,
             reduceRoomTone: false,
+            reduceReverb: false,
             enhanceVoiceEq: false,
             normalizeLoudness: false,
             enableLimiter: false,
@@ -403,6 +414,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         double silenceThresholdDb,
         bool enableDenoise,
         bool reduceRoomTone,
+        bool reduceReverb,
         bool enhanceVoiceEq,
         bool normalizeLoudness,
         bool enableLimiter,
@@ -413,6 +425,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SilenceThresholdDb = silenceThresholdDb;
         EnableDenoise = enableDenoise;
         ReduceRoomTone = reduceRoomTone;
+        ReduceReverb = reduceReverb;
         EnhanceVoiceEq = enhanceVoiceEq;
         NormalizeLoudness = normalizeLoudness;
         EnableLimiter = enableLimiter;
@@ -916,6 +929,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SilenceThresholdDb,
             EnableDenoise,
             ReduceRoomTone,
+            ReduceReverb,
             EnhanceVoiceEq,
             NormalizeLoudness,
             EnableLimiter,
@@ -1657,6 +1671,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 SilenceThresholdDb,
                 EnableDenoise,
                 ReduceRoomTone,
+                ReduceReverb,
                 EnhanceVoiceEq,
                 NormalizeLoudness,
                 EnableLimiter,
@@ -1936,6 +1951,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     silenceThresholdDb: -35,
                     enableDenoise: true,
                     reduceRoomTone: true,
+                    reduceReverb: false,
                     enhanceVoiceEq: true,
                     normalizeLoudness: true,
                     enableLimiter: true,
@@ -1948,7 +1964,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     silenceThresholdDb: -34,
                     enableDenoise: true,
                     reduceRoomTone: true,
+                    reduceReverb: true,
                     enhanceVoiceEq: false,
+                    normalizeLoudness: true,
+                    enableLimiter: true,
+                    volumeGainDb: 0)),
+            new(
+                "去殘響",
+                "ab_dereverb",
+                CreateProcessingOptions(
+                    silenceSeconds: 0.3,
+                    silenceThresholdDb: -35,
+                    enableDenoise: true,
+                    reduceRoomTone: true,
+                    reduceReverb: true,
+                    enhanceVoiceEq: true,
                     normalizeLoudness: true,
                     enableLimiter: true,
                     volumeGainDb: 0)),
@@ -1960,6 +1990,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     silenceThresholdDb: -36,
                     enableDenoise: true,
                     reduceRoomTone: true,
+                    reduceReverb: false,
                     enhanceVoiceEq: true,
                     normalizeLoudness: true,
                     enableLimiter: true,
@@ -1972,6 +2003,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     silenceThresholdDb: -35,
                     enableDenoise: false,
                     reduceRoomTone: false,
+                    reduceReverb: false,
                     enhanceVoiceEq: false,
                     normalizeLoudness: false,
                     enableLimiter: false,
@@ -1984,6 +2016,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         double silenceThresholdDb,
         bool enableDenoise,
         bool reduceRoomTone,
+        bool reduceReverb,
         bool enhanceVoiceEq,
         bool normalizeLoudness,
         bool enableLimiter,
@@ -1994,6 +2027,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             silenceThresholdDb,
             enableDenoise,
             reduceRoomTone,
+            reduceReverb,
             enhanceVoiceEq,
             normalizeLoudness,
             enableLimiter,
@@ -2289,6 +2323,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             EnableDeepFilterNetPostFilter = settings.EnableDeepFilterNetPostFilter;
             FallbackToFfmpegWhenAiFails = settings.FallbackToFfmpegWhenAiFails;
             ReduceRoomTone = settings.ReduceRoomTone;
+            ReduceReverb = settings.ReduceReverb;
             EnhanceVoiceEq = settings.EnhanceVoiceEq;
             NormalizeLoudness = settings.NormalizeLoudness;
             EnableLimiter = settings.EnableLimiter;
@@ -2354,6 +2389,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 EnableDeepFilterNetPostFilter = EnableDeepFilterNetPostFilter,
                 FallbackToFfmpegWhenAiFails = FallbackToFfmpegWhenAiFails,
                 ReduceRoomTone = ReduceRoomTone,
+                ReduceReverb = ReduceReverb,
                 EnhanceVoiceEq = EnhanceVoiceEq,
                 NormalizeLoudness = NormalizeLoudness,
                 EnableLimiter = EnableLimiter,
@@ -2757,6 +2793,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         public bool FallbackToFfmpegWhenAiFails { get; set; } = true;
 
         public bool ReduceRoomTone { get; set; }
+
+        public bool ReduceReverb { get; set; }
 
         public bool EnhanceVoiceEq { get; set; }
 

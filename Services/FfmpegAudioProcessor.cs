@@ -10,6 +10,7 @@ public sealed record AudioProcessingOptions(
     double SilenceThresholdDb,
     bool EnableDenoise,
     bool ReduceRoomTone,
+    bool ReduceReverb,
     bool EnhanceVoiceEq,
     bool NormalizeLoudness,
     bool EnableLimiter,
@@ -591,6 +592,17 @@ public sealed class FfmpegAudioProcessor
             filters.Add("lowpass=f=9000");
             filters.Add("equalizer=f=250:t=q:w=1.1:g=-3");
             filters.Add("equalizer=f=500:t=q:w=1.2:g=-1.5");
+        }
+
+        if (options.ReduceReverb)
+        {
+            filters.Add("highpass=f=120");
+            filters.Add("lowpass=f=8500");
+            filters.Add("equalizer=f=180:t=q:w=0.8:g=-1.5");
+            filters.Add("equalizer=f=420:t=q:w=1.0:g=-2.5");
+            filters.Add("equalizer=f=900:t=q:w=1.2:g=-1");
+            filters.Add("afftdn=nf=-28:tn=1");
+            filters.Add("acompressor=threshold=-24dB:ratio=2.8:attack=4:release=65:makeup=1dB");
         }
 
         if (options.EnhanceVoiceEq)

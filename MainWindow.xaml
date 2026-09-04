@@ -528,15 +528,15 @@
                                    Text="{Binding DeepFilterNetStatusText}" />
                         <TextBlock Style="{StaticResource MetaTextStyle}"
                                    Text="{Binding DeepFilterNetPathText}" />
-                                <WrapPanel Margin="0,8,0,0">
+                        <WrapPanel Margin="0,8,0,0">
                             <Button Click="ChooseDeepFilterNet_Click" Content="指定 DFN" />
                             <Button Margin="8,0,0,0"
                                     Click="ClearDeepFilterNet_Click"
                                     Content="清除" />
-                                </WrapPanel>
+                        </WrapPanel>
 
-                                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="聲音補強" />
-                                <CheckBox Margin="0,0,0,0"
+                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="聲音補強" />
+                        <CheckBox Margin="0,0,0,0"
                                   VerticalContentAlignment="Center"
                                   Content="統一降噪"
                                   IsChecked="{Binding EnableDenoise, Mode=TwoWay}" />
@@ -545,6 +545,11 @@
                                   VerticalContentAlignment="Center"
                                   Content="減少空間音"
                                   IsChecked="{Binding ReduceRoomTone, Mode=TwoWay}" />
+
+                        <CheckBox Margin="0,10,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="去殘響"
+                                  IsChecked="{Binding ReduceReverb, Mode=TwoWay}" />
 
                         <CheckBox Margin="0,10,0,0"
                                   VerticalContentAlignment="Center"
@@ -561,8 +566,8 @@
                                   Content="防爆音 Limiter"
                                   IsChecked="{Binding EnableLimiter, Mode=TwoWay}" />
 
-                                <TextBlock Style="{StaticResource FieldLabelStyle}" Text="音量增益 dB" />
-                                <Grid>
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="音量增益 dB" />
+                        <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="88" />
@@ -580,7 +585,7 @@
                                      HorizontalContentAlignment="Right"
                                      Margin="8,0,0,0"
                                      Text="{Binding VolumeGainDb, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.0}" />
-                                </Grid>
+                        </Grid>
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>

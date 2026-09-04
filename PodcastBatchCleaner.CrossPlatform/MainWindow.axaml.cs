@@ -352,6 +352,7 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
             SilenceThresholdDb,
             EnableDenoise,
             ReduceRoomTone,
+            false,
             EnhanceVoiceEq,
             NormalizeLoudness,
             EnableLimiter,
