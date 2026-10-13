@@ -22,11 +22,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 {
     private readonly FfmpegAudioProcessor _processor = new();
     private readonly DeepFilterNetAudioProcessor _deepFilterNetProcessor = new();
+    private readonly VoiceFixerAudioProcessor _voiceFixerProcessor = new();
+    private readonly AudioBlendProcessor _audioBlendProcessor = new();
+    private int _denoiseStrengthIndex = 1;
+    private double _voiceFixerMix = 0.6;
+    private bool _matchComparisonLoudness = true;
+    private bool _aiDenoiseApplied;
     private readonly MediaPlayer _player = new();
     private readonly DispatcherTimer _playbackTimer;
     private static readonly JsonSerializerOptions SettingsJsonOptions = new() { WriteIndented = true };
     private static readonly TimeSpan PreviewDuration = TimeSpan.FromSeconds(30);
     private CancellationTokenSource? _processingCancellation;
+    private CancellationTokenSource? _analysisCancellation;
     private AudioFileItem? _selectedFile;
     private AudioFileItem? _draggedAudioFile;
     private System.Windows.Point _dragStartPoint;
@@ -36,6 +43,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string? _ffmpegPath;
     private bool _isDraggingPosition;
     private bool _isProcessing;
+    private bool _closeAfterWork;
+    private readonly List<string> _processingWarnings = [];
+    private readonly List<string> _completedProcessingTools = [];
+    private int _processingWarningCount;
+    private AudioFileItem? _processingReportItem;
     private bool _loadedDeepFilterNetPreference;
     private double _silenceSeconds = 0.1;
     private double _silenceThresholdDb = -35;
@@ -45,8 +57,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _enableDeepFilterNetPostFilter = true;
     private bool _fallbackToFfmpegWhenAiFails = true;
     private string? _deepFilterNetPath;
+    private bool _enableVoiceFixerDereverb;
+    private int _voiceFixerMode;
+    private string? _voiceFixerPath;
     private bool _reduceRoomTone;
     private bool _reduceReverb;
+    private double _reverbReductionAmount = FfmpegAudioProcessor.DefaultReverbReductionAmount;
     private bool _enhanceVoiceEq;
     private bool _normalizeLoudness = true;
     private bool _enableLimiter = true;
@@ -76,7 +92,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _playbackPositionText = "00:00";
     private string _playbackDurationText = "00:00";
 
-    public MainWindow()
+    public MainWindow() : this(loadSettings: true)
+    {
+    }
+
+    internal MainWindow(bool loadSettings)
     {
         InitializeComponent();
         DataContext = this;
@@ -91,7 +111,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _player.MediaEnded += Player_MediaEnded;
         _player.MediaFailed += Player_MediaFailed;
 
-        LoadSettings();
+        if (loadSettings) LoadSettings();
     }
 
     public ObservableCollection<AudioFileItem> AudioFiles { get; } = [];
@@ -128,6 +148,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return string.IsNullOrWhiteSpace(_deepFilterNetPath) || !File.Exists(_deepFilterNetPath)
                 ? "AI 工具：未找到"
                 : "AI 工具：DeepFilterNet 已就緒";
+        }
+    }
+
+    public string VoiceFixerPathText => _voiceFixerPath is null
+        ? "VoiceFixer：尚未設定 voicefixer.exe / voicefixer.cmd"
+        : $"VoiceFixer：{_voiceFixerPath}";
+
+    public string VoiceFixerStatusText
+    {
+        get
+        {
+            if (!EnableVoiceFixerDereverb)
+            {
+                return "免費去殘響模型：已停用";
+            }
+
+            if (VoiceFixerMix <= 0) return "VoiceFixer：混合比例 0%，略過模型";
+
+            return string.IsNullOrWhiteSpace(_voiceFixerPath) || !File.Exists(_voiceFixerPath)
+                ? "免費去殘響模型：未找到 VoiceFixer"
+                : $"免費去殘響模型：VoiceFixer 已就緒，模式 {VoiceFixerMode}";
         }
     }
 
@@ -186,7 +227,47 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool IsAnalyzing
     {
         get => _isAnalyzing;
-        set => SetField(ref _isAnalyzing, value);
+        set
+        {
+            if (SetField(ref _isAnalyzing, value))
+            {
+                OnPropertyChanged(nameof(CanStartWork));
+            }
+        }
+    }
+
+    public bool CanStartWork => !_isProcessing && !_isAnalyzing;
+
+    public string ProcessingWarningsText => string.Join(Environment.NewLine, _processingWarnings)
+        + (_processingWarningCount > _processingWarnings.Count
+            ? $"{Environment.NewLine}其餘 {_processingWarningCount - _processingWarnings.Count} 則警告未列出。" : string.Empty);
+    public bool HasProcessingWarnings => _processingWarningCount > 0;
+    public string ProcessingWarningSummary => $"處理警告：{_processingWarningCount} 則";
+    public string ProcessingToolsText => _processingReportItem is null
+        ? "尚無處理紀錄"
+        : $"{_processingReportItem.FileName}：{string.Join(" → ", _completedProcessingTools)}";
+    public bool IsDenoiseStrengthEnabled => EnableDenoise || EnableDeepFilterNet;
+    public bool IsAiFallbackEnabled => EnableDeepFilterNet || (EnableVoiceFixerDereverb && VoiceFixerMix > 0);
+    public bool IsVoiceFixerModeEnabled => EnableVoiceFixerDereverb && VoiceFixerMix > 0;
+
+    public bool IsProcessing
+    {
+        get => _isProcessing;
+        private set
+        {
+            if (SetField(ref _isProcessing, value))
+            {
+                if (value)
+                {
+                    _processingWarnings.Clear();
+                    _processingWarningCount = 0;
+                    _completedProcessingTools.Clear();
+                    _processingReportItem = null;
+                    NotifyProcessingReportChanged();
+                }
+                OnPropertyChanged(nameof(CanStartWork));
+            }
+        }
     }
 
     public string AnalysisText
@@ -222,7 +303,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool EnableDenoise
     {
         get => _enableDenoise;
-        set => SetField(ref _enableDenoise, value);
+        set
+        {
+            if (SetField(ref _enableDenoise, value)) OnPropertyChanged(nameof(IsDenoiseStrengthEnabled));
+        }
     }
 
     public bool UseAiProcessedAudio
@@ -239,6 +323,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (SetField(ref _enableDeepFilterNet, value))
             {
                 OnPropertyChanged(nameof(DeepFilterNetStatusText));
+                OnPropertyChanged(nameof(IsDenoiseStrengthEnabled));
+                OnPropertyChanged(nameof(IsAiFallbackEnabled));
             }
         }
     }
@@ -255,17 +341,86 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         set => SetField(ref _fallbackToFfmpegWhenAiFails, value);
     }
 
+    public bool EnableVoiceFixerDereverb
+    {
+        get => _enableVoiceFixerDereverb;
+        set
+        {
+            if (SetField(ref _enableVoiceFixerDereverb, value))
+            {
+                OnPropertyChanged(nameof(VoiceFixerStatusText));
+                OnPropertyChanged(nameof(IsVoiceFixerModeEnabled));
+                OnPropertyChanged(nameof(IsAiFallbackEnabled));
+            }
+        }
+    }
+
+    public int VoiceFixerMode
+    {
+        get => _voiceFixerMode;
+        set
+        {
+            if (SetField(ref _voiceFixerMode, Math.Clamp(value, 0, 2)))
+            {
+                OnPropertyChanged(nameof(VoiceFixerStatusText));
+            }
+        }
+    }
+
     public bool ReduceRoomTone
     {
         get => _reduceRoomTone;
         set => SetField(ref _reduceRoomTone, value);
     }
 
+    public int DenoiseStrengthIndex
+    {
+        get => _denoiseStrengthIndex;
+        set => SetField(ref _denoiseStrengthIndex, Math.Clamp(value, 0, 2));
+    }
+
+    private double DenoiseReductionDb => new[] { 6d, 12d, 24d }[DenoiseStrengthIndex];
+    private double AiAttenuationLimitDb => new[] { 10d, 20d, 100d }[DenoiseStrengthIndex];
+
+    public double VoiceFixerMix
+    {
+        get => _voiceFixerMix;
+        set
+        {
+            if (SetField(ref _voiceFixerMix, double.IsFinite(value) ? Math.Clamp(value, 0, 1) : 0.6))
+            {
+                OnPropertyChanged(nameof(IsVoiceFixerModeEnabled));
+                OnPropertyChanged(nameof(IsAiFallbackEnabled));
+                OnPropertyChanged(nameof(VoiceFixerStatusText));
+            }
+        }
+    }
+
+    public bool MatchComparisonLoudness
+    {
+        get => _matchComparisonLoudness;
+        set => SetField(ref _matchComparisonLoudness, value);
+    }
+
     public bool ReduceReverb
     {
         get => _reduceReverb;
-        set => SetField(ref _reduceReverb, value);
+        set
+        {
+            if (SetField(ref _reduceReverb, value))
+            {
+                OnPropertyChanged(nameof(IsReverbReductionEnabled));
+            }
+        }
     }
+
+    public double ReverbReductionAmount
+    {
+        get => _reverbReductionAmount;
+        set => SetField(ref _reverbReductionAmount, Math.Clamp(Math.Round(value, 2), 0.2, 1.0));
+    }
+
+    public bool IsReverbReductionEnabled => ReduceReverb;
 
     public bool EnhanceVoiceEq
     {
@@ -342,7 +497,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public AudioChannelMode SelectedChannelMode
     {
         get => _selectedChannelMode;
-        set => SetField(ref _selectedChannelMode, value);
+        set
+        {
+            if (SetField(ref _selectedChannelMode, value))
+            {
+                OnPropertyChanged(nameof(IsStereoBalanceEnabled));
+            }
+        }
     }
 
     public double VolumeGainDb
@@ -356,6 +517,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         get => _stereoBalance;
         set => SetField(ref _stereoBalance, Math.Clamp(Math.Round(value, 2), -1, 1));
     }
+
+    public bool IsStereoBalanceEnabled => string.Equals(SelectedChannelMode.Value, "balance", StringComparison.OrdinalIgnoreCase);
 
     public int PlaybackSourceIndex
     {
@@ -373,6 +536,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             enableDenoise: true,
             reduceRoomTone: true,
             reduceReverb: false,
+            reverbReductionAmount: FfmpegAudioProcessor.DefaultReverbReductionAmount,
             enhanceVoiceEq: true,
             normalizeLoudness: true,
             enableLimiter: true,
@@ -388,6 +552,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             enableDenoise: true,
             reduceRoomTone: true,
             reduceReverb: true,
+            reverbReductionAmount: 0.8,
             enhanceVoiceEq: false,
             normalizeLoudness: true,
             enableLimiter: true,
@@ -403,6 +568,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             enableDenoise: true,
             reduceRoomTone: true,
             reduceReverb: false,
+            reverbReductionAmount: FfmpegAudioProcessor.DefaultReverbReductionAmount,
             enhanceVoiceEq: true,
             normalizeLoudness: true,
             enableLimiter: true,
@@ -418,6 +584,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             enableDenoise: false,
             reduceRoomTone: false,
             reduceReverb: false,
+            reverbReductionAmount: FfmpegAudioProcessor.DefaultReverbReductionAmount,
             enhanceVoiceEq: false,
             normalizeLoudness: false,
             enableLimiter: false,
@@ -431,6 +598,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         bool enableDenoise,
         bool reduceRoomTone,
         bool reduceReverb,
+        double reverbReductionAmount,
         bool enhanceVoiceEq,
         bool normalizeLoudness,
         bool enableLimiter,
@@ -442,6 +610,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         EnableDenoise = enableDenoise;
         ReduceRoomTone = reduceRoomTone;
         ReduceReverb = reduceReverb;
+        ReverbReductionAmount = reverbReductionAmount;
         EnhanceVoiceEq = enhanceVoiceEq;
         NormalizeLoudness = normalizeLoudness;
         EnableLimiter = enableLimiter;
@@ -467,9 +636,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             EnableDeepFilterNet = true;
         }
 
+        if (VoiceFixerMix > 0 && (string.IsNullOrWhiteSpace(_voiceFixerPath) || !File.Exists(_voiceFixerPath)))
+        {
+            _voiceFixerPath = VoiceFixerAudioProcessor.TryFindVoiceFixer();
+        }
+
         OnPropertyChanged(nameof(FfmpegPathText));
         OnPropertyChanged(nameof(DeepFilterNetPathText));
         OnPropertyChanged(nameof(DeepFilterNetStatusText));
+        OnPropertyChanged(nameof(VoiceFixerPathText));
+        OnPropertyChanged(nameof(VoiceFixerStatusText));
 
         StatusText = _ffmpegPath is null
             ? "找不到 FFmpeg。播放可使用；輸出前請指定 ffmpeg.exe。"
@@ -485,8 +661,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (!CanStartWork)
+        {
+            e.Cancel = true;
+            _closeAfterWork = true;
+            _processingCancellation?.Cancel();
+            _analysisCancellation?.Cancel();
+            StatusText = "正在停止工作並關閉...";
+            return;
+        }
         SaveSettings();
         _processingCancellation?.Cancel();
+        _analysisCancellation?.Cancel();
         _playbackTimer.Stop();
         _player.Close();
     }
@@ -582,6 +768,36 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(DeepFilterNetPathText));
         OnPropertyChanged(nameof(DeepFilterNetStatusText));
         StatusText = "已清除 DeepFilterNet。";
+    }
+
+    private void ChooseVoiceFixer_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "選取 voicefixer.exe / voicefixer.cmd",
+            Filter = "VoiceFixer|voicefixer.exe;voicefixer.cmd;voicefixer.bat|執行檔|*.exe;*.cmd;*.bat|所有檔案|*.*",
+            InitialDirectory = _currentFolder ?? Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        _voiceFixerPath = dialog.FileName;
+        EnableVoiceFixerDereverb = true;
+        OnPropertyChanged(nameof(VoiceFixerPathText));
+        OnPropertyChanged(nameof(VoiceFixerStatusText));
+        StatusText = "已設定 VoiceFixer。";
+    }
+
+    private void ClearVoiceFixer_Click(object sender, RoutedEventArgs e)
+    {
+        _voiceFixerPath = null;
+        EnableVoiceFixerDereverb = false;
+        OnPropertyChanged(nameof(VoiceFixerPathText));
+        OnPropertyChanged(nameof(VoiceFixerStatusText));
+        StatusText = "已清除 VoiceFixer。";
     }
 
     private void ChooseIntroAudio_Click(object sender, RoutedEventArgs e)
@@ -817,6 +1033,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "正在取消處理...";
     }
 
+    private void CancelAnalysis_Click(object sender, RoutedEventArgs e)
+    {
+        _analysisCancellation?.Cancel();
+        StatusText = "正在取消分析...";
+    }
+
     private void OpenOutputFolder_Click(object sender, RoutedEventArgs e)
     {
         var folder = _outputFolder;
@@ -894,7 +1116,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task ProcessItemsAsync(IReadOnlyList<AudioFileItem> items)
     {
-        if (_isProcessing)
+        if (!CanStartWork)
         {
             StatusText = "目前已經在處理中。";
             return;
@@ -928,7 +1150,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         Directory.CreateDirectory(_outputFolder);
 
-        _isProcessing = true;
+        IsProcessing = true;
         _processingCancellation = new CancellationTokenSource();
         IsProgressVisible = true;
         ProcessingProgress = 0;
@@ -936,8 +1158,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         CurrentProcessingFileText = string.Empty;
         var summary = new ProcessingRunSummary(items.Count, _outputFolder, MergeSegments);
         var showSummary = false;
-        var deepFilterTempDirectory = EnableDeepFilterNet
-            ? Path.Combine(_outputFolder, $".deepfilter_stage_{Guid.NewGuid():N}")
+        var externalStageCount = CountExternalPreprocessStages();
+        var aiTempDirectory = externalStageCount > 0
+            ? Path.Combine(_outputFolder, $".ai_stage_{Guid.NewGuid():N}")
             : null;
 
         var options = new AudioProcessingOptions(
@@ -946,13 +1169,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             EnableDenoise,
             ReduceRoomTone,
             ReduceReverb,
+            ReverbReductionAmount,
             EnhanceVoiceEq,
             NormalizeLoudness,
             EnableLimiter,
             VolumeGainDb,
             SelectedChannelMode,
             StereoBalance,
-            _outputFolder);
+            _outputFolder,
+            DenoiseReductionDb);
 
         var progressWindow = new ProcessingProgressWindow
         {
@@ -963,6 +1188,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         try
         {
+            ffmpegPath = await EnsureOutputEncoderAsync(ffmpegPath, progressWindow, _processingCancellation.Token);
             if (MergeSegments)
             {
                 var mergedOutputPath = await ProcessMergedItemsAsync(ffmpegPath, items, options, progressWindow);
@@ -1006,38 +1232,36 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                         options.OutputFolder,
                         item.CustomOutputFileName,
                         SelectedOutputFormat.Extension);
-                    if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+                    var sourceDuration = await GetProcessingDurationAsync(ffmpegPath, item, processingInputPath,
+                        _processingCancellation.Token);
+                    if (!TryGetTrimRangeForDuration(item, sourceDuration, out var trimStart, out var trimEnd, out var trimError))
                     {
                         item.Status = "剪輯時間錯誤";
                         throw new InvalidOperationException(trimError);
                     }
 
-                    if (item.Duration is null)
-                    {
-                        item.Duration = await _processor.ProbeDurationAsync(
-                            ffmpegPath,
-                            processingInputPath,
-                            _processingCancellation.Token);
-                    }
-
-                    var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
+                    var effectiveDuration = GetEffectiveDuration(sourceDuration, trimStart, trimEnd);
+                    var completedExternalStages = 0;
                     if (EnableDeepFilterNet)
                     {
                         try
                         {
+                            var stageStart = GetExternalStageFraction(completedExternalStages, externalStageCount);
+                            var stageEnd = GetExternalStageFraction(completedExternalStages + 1, externalStageCount);
                             processingInputPath = await ProcessWithDeepFilterNetAsync(
                                 ffmpegPath,
                                 processingInputPath,
                                 item.FileName,
-                                deepFilterTempDirectory!,
+                                aiTempDirectory!,
                                 progressWindow,
-                                Math.Clamp((itemIndex / (double)total) * 100, 0, 100),
-                                Math.Clamp(((itemIndex + 0.45d) / total) * 100, 0, 100),
+                                Math.Clamp(((itemIndex + stageStart) / total) * 100, 0, 100),
+                                Math.Clamp(((itemIndex + stageEnd) / total) * 100, 0, 100),
                                 effectiveDuration,
                                 trimStart,
                                 trimEnd,
                                 _processingCancellation.Token);
 
+                            completedExternalStages++;
                             trimStart = null;
                             trimEnd = null;
                             effectiveDuration = await _processor.ProbeDurationAsync(
@@ -1047,30 +1271,68 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
                         {
+                            completedExternalStages++;
                             item.Status = "AI 失敗，改用 FFmpeg";
+                            RecordAiFallback("DeepFilterNet", item.FileName, ex);
                             StatusText = $"DeepFilterNet 失敗，改用 FFmpeg：{item.FileName}";
                             progressWindow.SetProgress($"AI 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
                         }
                     }
 
+                    if (EnableVoiceFixerDereverb)
+                    {
+                        try
+                        {
+                            var stageStart = GetExternalStageFraction(completedExternalStages, externalStageCount);
+                            var stageEnd = GetExternalStageFraction(completedExternalStages + 1, externalStageCount);
+                            processingInputPath = await ProcessWithVoiceFixerAsync(
+                                ffmpegPath,
+                                processingInputPath,
+                                item.FileName,
+                                aiTempDirectory!,
+                                progressWindow,
+                                Math.Clamp(((itemIndex + stageStart) / total) * 100, 0, 100),
+                                Math.Clamp(((itemIndex + stageEnd) / total) * 100, 0, 100),
+                                effectiveDuration,
+                                trimStart,
+                                trimEnd,
+                                _processingCancellation.Token);
+
+                            completedExternalStages++;
+                            trimStart = null;
+                            trimEnd = null;
+                            effectiveDuration = await _processor.ProbeDurationAsync(
+                                ffmpegPath,
+                                processingInputPath,
+                                _processingCancellation.Token);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
+                        {
+                            completedExternalStages++;
+                            item.Status = "VoiceFixer 失敗，改用 FFmpeg";
+                            RecordAiFallback("VoiceFixer", item.FileName, ex);
+                            StatusText = $"VoiceFixer 失敗，改用 FFmpeg：{item.FileName}";
+                            progressWindow.SetProgress($"VoiceFixer 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
+                        }
+                    }
+
                     var progress = new Progress<AudioProcessingProgress>(current =>
                     {
-                        var itemPercent = EnableDeepFilterNet
-                            ? 0.45d + (current.Percent * 0.55d)
-                            : current.Percent;
+                        var ffmpegStart = GetFfmpegStartFraction(externalStageCount);
+                        var itemPercent = ffmpegStart + (current.Percent * (1 - ffmpegStart));
                         var overallPercent = Math.Clamp(((itemIndex + itemPercent) / total) * 100, 0, 100);
                         ProcessingProgress = overallPercent;
                         ProcessingProgressText = $"{overallPercent:0}%";
-                        progressWindow.SetProgress(item.FileName, overallPercent);
-                        item.Status = $"{overallPercent:0}%";
-                        StatusText = $"處理中：{item.FileName}";
+                        progressWindow.SetProgress($"{current.Stage ?? "處理中"}：{item.FileName}", overallPercent);
+                        item.Status = $"{itemPercent * 100:0}%";
+                        StatusText = $"{current.Stage ?? "處理中"}：{item.FileName}";
                     });
 
                     await _processor.ProcessAsync(
                         ffmpegPath,
                         processingInputPath,
                         outputPath,
-                        options,
+                        AvoidRepeatedDenoise(options),
                         effectiveDuration,
                         progress,
                         cancellationToken: _processingCancellation.Token,
@@ -1078,6 +1340,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                         trimStart: trimStart,
                         trimEnd: trimEnd);
 
+                    RecordCompletedProcessingTool("FFmpeg");
                     item.ProcessedPath = outputPath;
                     item.Status = "完成";
                     item.IsProcessing = false;
@@ -1096,9 +1359,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 }
                 finally
                 {
-                    ProcessingProgress = Math.Clamp(((itemIndex + 1d) / total) * 100, 0, 100);
-                    ProcessingProgressText = $"{ProcessingProgress:0}%";
-                    progressWindow.SetProgress(item.FileName, ProcessingProgress);
+                    if (!_processingCancellation.IsCancellationRequested)
+                    {
+                        ProcessingProgress = Math.Clamp(((itemIndex + 1d) / total) * 100, 0, 100);
+                        ProcessingProgressText = $"{ProcessingProgress:0}%";
+                        progressWindow.SetProgress(item.FileName, ProcessingProgress);
+                    }
                 }
             }
 
@@ -1137,22 +1403,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         finally
         {
-            _isProcessing = false;
+            IsProcessing = false;
             _processingCancellation?.Dispose();
             _processingCancellation = null;
             CurrentProcessingFileText = string.Empty;
             IsProgressVisible = false;
-            progressWindow.Close();
+            progressWindow.CompleteAndClose();
 
-            if (showSummary)
+            if (showSummary && !_closeAfterWork)
             {
                 ShowProcessingSummary(summary);
             }
 
-            if (deepFilterTempDirectory is not null)
+            if (aiTempDirectory is not null)
             {
-                TryDeleteDirectory(deepFilterTempDirectory);
+                TryDeleteDirectory(aiTempDirectory);
             }
+            FinishPendingClose();
         }
     }
 
@@ -1169,6 +1436,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var hasOutro = !string.IsNullOrWhiteSpace(_outroAudioPath) && File.Exists(_outroAudioPath);
         var totalSteps = items.Count + 1d + (hasIntro ? 1 : 0) + (hasOutro ? 1 : 0);
         var completedSteps = 0d;
+        var externalStageCount = CountExternalPreprocessStages();
 
         try
         {
@@ -1227,13 +1495,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     StatusText = $"找不到 AI 音檔，使用原檔：{item.FileName}";
                 }
 
-                var duration = await _processor.ProbeDurationAsync(
-                    ffmpegPath,
-                    processingInputPath,
+                var duration = await GetProcessingDurationAsync(
+                    ffmpegPath, item, processingInputPath,
                     _processingCancellation?.Token ?? CancellationToken.None);
-                item.Duration ??= duration;
 
-                if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+                if (!TryGetTrimRangeForDuration(item, duration, out var trimStart, out var trimEnd, out var trimError))
                 {
                     item.Status = "剪輯時間錯誤";
                     throw new InvalidOperationException($"{item.FileName}：{trimError}");
@@ -1242,24 +1508,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 var segmentPath = Path.Combine(tempDirectory, $"{index + 1:0000}.wav");
                 var stepStart = completedSteps;
                 var effectiveDuration = GetEffectiveDuration(duration, trimStart, trimEnd);
+                var completedExternalStages = 0;
 
                 if (EnableDeepFilterNet)
                 {
                     try
                     {
+                        var stageStart = GetExternalStageFraction(completedExternalStages, externalStageCount);
+                        var stageEnd = GetExternalStageFraction(completedExternalStages + 1, externalStageCount);
                         processingInputPath = await ProcessWithDeepFilterNetAsync(
                             ffmpegPath,
                             processingInputPath,
                             item.FileName,
                             tempDirectory,
                             progressWindow,
-                            Math.Clamp((stepStart / totalSteps) * 100, 0, 100),
-                            Math.Clamp(((stepStart + 0.45d) / totalSteps) * 100, 0, 100),
+                            Math.Clamp(((stepStart + stageStart) / totalSteps) * 100, 0, 100),
+                            Math.Clamp(((stepStart + stageEnd) / totalSteps) * 100, 0, 100),
                             effectiveDuration,
                             trimStart,
                             trimEnd,
                             _processingCancellation?.Token ?? CancellationToken.None);
 
+                        completedExternalStages++;
                         trimStart = null;
                         trimEnd = null;
                         effectiveDuration = await _processor.ProbeDurationAsync(
@@ -1269,26 +1539,64 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
                     {
+                        completedExternalStages++;
                         item.Status = "AI 失敗，改用 FFmpeg";
+                        RecordAiFallback("DeepFilterNet", item.FileName, ex);
                         StatusText = $"DeepFilterNet 失敗，改用 FFmpeg：{item.FileName}";
                         progressWindow.SetProgress($"AI 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
                     }
                 }
 
+                if (EnableVoiceFixerDereverb)
+                {
+                    try
+                    {
+                        var stageStart = GetExternalStageFraction(completedExternalStages, externalStageCount);
+                        var stageEnd = GetExternalStageFraction(completedExternalStages + 1, externalStageCount);
+                        processingInputPath = await ProcessWithVoiceFixerAsync(
+                            ffmpegPath,
+                            processingInputPath,
+                            item.FileName,
+                            tempDirectory,
+                            progressWindow,
+                            Math.Clamp(((stepStart + stageStart) / totalSteps) * 100, 0, 100),
+                            Math.Clamp(((stepStart + stageEnd) / totalSteps) * 100, 0, 100),
+                            effectiveDuration,
+                            trimStart,
+                            trimEnd,
+                            _processingCancellation?.Token ?? CancellationToken.None);
+
+                        completedExternalStages++;
+                        trimStart = null;
+                        trimEnd = null;
+                        effectiveDuration = await _processor.ProbeDurationAsync(
+                            ffmpegPath,
+                            processingInputPath,
+                            _processingCancellation?.Token ?? CancellationToken.None);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
+                    {
+                        completedExternalStages++;
+                        item.Status = "VoiceFixer 失敗，改用 FFmpeg";
+                        RecordAiFallback("VoiceFixer", item.FileName, ex);
+                        StatusText = $"VoiceFixer 失敗，改用 FFmpeg：{item.FileName}";
+                        progressWindow.SetProgress($"VoiceFixer 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
+                    }
+                }
+
                 var progress = new Progress<AudioProcessingProgress>(current =>
                 {
-                    var itemPercent = EnableDeepFilterNet
-                        ? 0.45d + (current.Percent * 0.55d)
-                        : current.Percent;
-                    UpdateMergeStepProgress(item.FileName, stepStart, itemPercent, totalSteps, progressWindow);
-                    item.Status = $"{ProcessingProgress:0}%";
+                    var ffmpegStart = GetFfmpegStartFraction(externalStageCount);
+                    var itemPercent = ffmpegStart + (current.Percent * (1 - ffmpegStart));
+                    UpdateMergeStepProgress($"{current.Stage ?? "處理分段"}：{item.FileName}", stepStart, itemPercent, totalSteps, progressWindow);
+                    item.Status = $"{itemPercent * 100:0}%";
                 });
 
                 await _processor.ProcessAsync(
                     ffmpegPath,
                     processingInputPath,
                     segmentPath,
-                    options,
+                    AvoidRepeatedDenoise(options),
                     effectiveDuration,
                     progress,
                     _processingCancellation?.Token ?? CancellationToken.None,
@@ -1298,6 +1606,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     trimStart: trimStart,
                     trimEnd: trimEnd);
 
+                RecordCompletedProcessingTool("FFmpeg");
                 segmentPaths.Add(segmentPath);
                 item.Status = "已加入統整";
                 item.IsProcessing = false;
@@ -1345,14 +1654,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var mergeProgress = new Progress<AudioProcessingProgress>(current =>
             {
                 UpdateMergeStepProgress(
-                    Path.GetFileName(mergedOutputPath),
+                    $"{current.Stage ?? "合併輸出"}：{Path.GetFileName(mergedOutputPath)}",
                     completedSteps,
                     current.Percent,
                     totalSteps,
                     progressWindow);
-                StatusText = $"合併輸出：{Path.GetFileName(mergedOutputPath)}";
+                StatusText = $"{current.Stage ?? "合併輸出"}：{Path.GetFileName(mergedOutputPath)}";
             });
 
+            if (options.NormalizeLoudness)
+            {
+                StatusText = $"整集響度分析：{Path.GetFileName(mergedOutputPath)}";
+                progressWindow.SetIndeterminate("整集響度分析", Path.GetFileName(mergedOutputPath));
+            }
             await _processor.MergeAsync(
                 ffmpegPath,
                 segmentPaths,
@@ -1365,7 +1679,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     PodcastArtist,
                     PodcastAlbum,
                     _coverImagePath),
-                SelectedOutputFormat);
+                SelectedOutputFormat,
+                normalizeLoudness: options.NormalizeLoudness,
+                enableLimiter: options.EnableLimiter);
 
             foreach (var item in items)
             {
@@ -1387,7 +1703,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task ProcessComparisonAsync(AudioFileItem item)
     {
-        if (_isProcessing)
+        if (!CanStartWork)
         {
             StatusText = "目前已經在處理中。";
             return;
@@ -1415,7 +1731,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var comparisonFolder = Path.Combine(_outputFolder, "ab_compare");
         Directory.CreateDirectory(comparisonFolder);
 
-        _isProcessing = true;
+        IsProcessing = true;
         _processingCancellation = new CancellationTokenSource();
         IsProgressVisible = true;
         ProcessingProgress = 0;
@@ -1430,44 +1746,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         progressWindow.Show();
 
         var outputs = new List<string>();
-        var comparisonTempDirectory = EnableDeepFilterNet
-            ? Path.Combine(comparisonFolder, $".deepfilter_compare_{Guid.NewGuid():N}")
-            : null;
+        var externalStageCount = CountExternalPreprocessStages();
+        var comparisonTempDirectory = Path.Combine(comparisonFolder, $".ai_compare_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(comparisonTempDirectory);
 
         try
         {
             var processingInputPath = GetProcessingInputPath(item);
-            if (item.Duration is null)
-            {
-                item.Duration = await _processor.ProbeDurationAsync(
-                    ffmpegPath,
-                    processingInputPath,
-                    _processingCancellation.Token);
-            }
+            ffmpegPath = await EnsureOutputEncoderAsync(ffmpegPath, progressWindow, _processingCancellation.Token);
+            var sourceDuration = await GetProcessingDurationAsync(ffmpegPath, item, processingInputPath,
+                _processingCancellation.Token);
 
-            if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+            if (!TryGetTrimRangeForDuration(item, sourceDuration, out var trimStart, out var trimEnd, out var trimError))
             {
                 throw new InvalidOperationException($"{item.FileName}：{trimError}");
             }
 
-            var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
+            var originalDuration = await GetProcessingDurationAsync(ffmpegPath, item, item.FilePath,
+                _processingCancellation.Token);
+            if (!TryGetTrimRangeForDuration(item, originalDuration, out var originalTrimStart, out var originalTrimEnd, out var originalError))
+                throw new InvalidOperationException($"原音比較：{originalError}");
+            var effectiveDuration = GetEffectiveDuration(sourceDuration, trimStart, trimEnd);
+            var completedExternalStages = 0;
             if (EnableDeepFilterNet)
             {
                 try
                 {
+                    var stageStart = GetExternalStageFraction(completedExternalStages, externalStageCount);
+                    var stageEnd = GetExternalStageFraction(completedExternalStages + 1, externalStageCount);
                     processingInputPath = await ProcessWithDeepFilterNetAsync(
                         ffmpegPath,
                         processingInputPath,
                         item.FileName,
                         comparisonTempDirectory!,
                         progressWindow,
-                        0,
-                        25,
+                        stageStart * 100,
+                        stageEnd * 100,
                         effectiveDuration,
                         trimStart,
                         trimEnd,
                         _processingCancellation.Token);
 
+                    completedExternalStages++;
                     trimStart = null;
                     trimEnd = null;
                     effectiveDuration = await _processor.ProbeDurationAsync(
@@ -1477,9 +1797,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
                 {
+                    completedExternalStages++;
                     item.Status = "AI 失敗，改用 FFmpeg";
+                    RecordAiFallback("DeepFilterNet", item.FileName, ex);
                     StatusText = $"DeepFilterNet 失敗，A/B 改用 FFmpeg：{item.FileName}";
                     progressWindow.SetProgress($"AI 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
+                }
+            }
+
+            if (EnableVoiceFixerDereverb)
+            {
+                try
+                {
+                    var stageStart = GetExternalStageFraction(completedExternalStages, externalStageCount);
+                    var stageEnd = GetExternalStageFraction(completedExternalStages + 1, externalStageCount);
+                    processingInputPath = await ProcessWithVoiceFixerAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        item.FileName,
+                        comparisonTempDirectory!,
+                        progressWindow,
+                        stageStart * 100,
+                        stageEnd * 100,
+                        effectiveDuration,
+                        trimStart,
+                        trimEnd,
+                        _processingCancellation.Token);
+
+                    completedExternalStages++;
+                    trimStart = null;
+                    trimEnd = null;
+                    effectiveDuration = await _processor.ProbeDurationAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        _processingCancellation.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
+                {
+                    completedExternalStages++;
+                    item.Status = "VoiceFixer 失敗，改用 FFmpeg";
+                    RecordAiFallback("VoiceFixer", item.FileName, ex);
+                    StatusText = $"VoiceFixer 失敗，A/B 改用 FFmpeg：{item.FileName}";
+                    progressWindow.SetProgress($"VoiceFixer 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
                 }
             }
 
@@ -1490,6 +1849,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 _processingCancellation.Token.ThrowIfCancellationRequested();
 
                 var preset = presets[index];
+                var presetInput = preset.UseOriginalInput ? item.FilePath : processingInputPath;
+                var presetStart = preset.UseOriginalInput ? originalTrimStart : trimStart;
+                var presetEnd = preset.UseOriginalInput ? originalTrimEnd : trimEnd;
+                var presetDuration = preset.UseOriginalInput
+                    ? GetEffectiveDuration(originalDuration, originalTrimStart, originalTrimEnd) : effectiveDuration;
+                var presetOptions = preset.UseOriginalInput ? preset.Options : AvoidRepeatedDenoise(preset.Options);
                 item.Status = $"比較 {index + 1}/{presets.Count}";
                 StatusText = $"A/B 比較：{preset.DisplayName}";
                 CurrentProcessingFileText = $"{item.FileName} - {preset.DisplayName}";
@@ -1502,34 +1867,49 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 var itemIndex = index;
                 var progress = new Progress<AudioProcessingProgress>(current =>
                 {
-                    var presetBase = EnableDeepFilterNet ? 0.25d : 0d;
-                    var presetRange = EnableDeepFilterNet ? 0.75d : 1d;
+                    var presetBase = GetFfmpegStartFraction(externalStageCount);
+                    var presetRange = 1 - presetBase;
                     var overallPercent = Math.Clamp(
                         (presetBase + (((itemIndex + current.Percent) / presets.Count) * presetRange)) * 100,
                         0,
                         100);
                     ProcessingProgress = overallPercent;
                     ProcessingProgressText = $"{overallPercent:0}%";
-                    progressWindow.SetProgress($"{item.FileName} - {preset.DisplayName}", overallPercent);
-                    item.Status = $"{overallPercent:0}%";
+                    progressWindow.SetProgress($"{current.Stage ?? "A/B 比較"}：{item.FileName} - {preset.DisplayName}", overallPercent);
+                    item.Status = $"{current.Percent * 100:0}%";
                 });
 
+                var renderPath = MatchComparisonLoudness
+                    ? Path.Combine(comparisonTempDirectory, $"comparison_{index}.wav") : outputPath;
                 await _processor.ProcessAsync(
                     ffmpegPath,
-                    processingInputPath,
-                    outputPath,
-                    preset.Options with { OutputFolder = comparisonFolder },
-                    effectiveDuration,
+                    presetInput,
+                    renderPath,
+                    presetOptions with
+                    {
+                        OutputFolder = comparisonFolder,
+                        NormalizeLoudness = !MatchComparisonLoudness && preset.Options.NormalizeLoudness
+                    },
+                    presetDuration,
                     progress,
                     cancellationToken: _processingCancellation.Token,
-                    audioCodec: SelectedOutputFormat.AudioCodec,
-                    trimStart: trimStart,
-                    trimEnd: trimEnd);
+                    audioCodec: MatchComparisonLoudness ? "pcm_s16le" : SelectedOutputFormat.AudioCodec,
+                    trimStart: presetStart,
+                    trimEnd: presetEnd);
+
+                if (MatchComparisonLoudness)
+                {
+                    progressWindow.SetIndeterminate("匹配 A/B 響度", item.FileName);
+                    var matchingProgress = new Progress<AudioProcessingProgress>(current =>
+                        progressWindow.SetIndeterminate(current.Stage ?? "匹配 A/B 響度", item.FileName));
+                    await _processor.MatchComparisonLoudnessAsync(ffmpegPath, renderPath, outputPath,
+                        SelectedOutputFormat.AudioCodec, _processingCancellation.Token, matchingProgress);
+                }
 
                 outputs.Add(outputPath);
                 item.ProcessedPath = outputPath;
-                var completedBase = EnableDeepFilterNet ? 0.25d : 0d;
-                var completedRange = EnableDeepFilterNet ? 0.75d : 1d;
+                var completedBase = GetFfmpegStartFraction(externalStageCount);
+                var completedRange = 1 - completedBase;
                 ProcessingProgress = Math.Clamp(
                     (completedBase + (((index + 1d) / presets.Count) * completedRange)) * 100,
                     0,
@@ -1537,7 +1917,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ProcessingProgressText = $"{ProcessingProgress:0}%";
             }
 
+            RecordCompletedProcessingTool("FFmpeg");
             item.Status = "比較完成";
+            item.ProcessedPath = outputs[1];
             StatusText = $"A/B 比較完成：{comparisonFolder}";
             ShowComparisonSummary(comparisonFolder, outputs);
         }
@@ -1554,23 +1936,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         finally
         {
-            _isProcessing = false;
+            IsProcessing = false;
             _processingCancellation?.Dispose();
             _processingCancellation = null;
             CurrentProcessingFileText = string.Empty;
             IsProgressVisible = false;
-            progressWindow.Close();
+            progressWindow.CompleteAndClose();
 
             if (comparisonTempDirectory is not null)
             {
                 TryDeleteDirectory(comparisonTempDirectory);
             }
+            FinishPendingClose();
         }
     }
 
     private async Task ProcessPreviewAsync(AudioFileItem item)
     {
-        if (_isProcessing)
+        if (!CanStartWork)
         {
             StatusText = "目前已經在處理中。";
             return;
@@ -1598,7 +1981,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         Directory.CreateDirectory(previewFolder);
 
-        _isProcessing = true;
+        IsProcessing = true;
         _processingCancellation = new CancellationTokenSource();
         IsProgressVisible = true;
         ProcessingProgress = 0;
@@ -1612,7 +1995,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         progressWindow.CancelRequested += (_, _) => _processingCancellation?.Cancel();
         progressWindow.Show();
 
-        var previewTempDirectory = EnableDeepFilterNet
+        var externalStageCount = CountExternalPreprocessStages();
+        var previewTempDirectory = externalStageCount > 0
             ? Path.Combine(previewFolder, $".preview_stage_{Guid.NewGuid():N}")
             : null;
 
@@ -1620,18 +2004,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             item.IsProcessing = true;
             item.Status = "產生試聽";
+            ffmpegPath = await EnsureOutputEncoderAsync(ffmpegPath, progressWindow, _processingCancellation.Token);
             StatusText = $"產生 30 秒試聽：{item.FileName}";
 
             var processingInputPath = GetProcessingInputPath(item);
-            if (item.Duration is null)
-            {
-                item.Duration = await _processor.ProbeDurationAsync(
-                    ffmpegPath,
-                    processingInputPath,
-                    _processingCancellation.Token);
-            }
+            var sourceDuration = await GetProcessingDurationAsync(ffmpegPath, item, processingInputPath,
+                _processingCancellation.Token);
 
-            if (!TryGetTrimRange(item, out var trimStart, out var trimEnd, out var trimError))
+            if (!TryGetTrimRangeForDuration(item, sourceDuration, out var trimStart, out var trimEnd, out var trimError))
             {
                 item.Status = "剪輯時間錯誤";
                 throw new InvalidOperationException(trimError);
@@ -1644,31 +2024,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 previewEnd = trimEnd.Value;
             }
 
-            if (item.Duration is not null && item.Duration < previewEnd)
+            if (sourceDuration is not null && sourceDuration < previewEnd)
             {
-                previewEnd = item.Duration.Value;
+                previewEnd = sourceDuration.Value;
             }
 
             trimEnd = previewEnd > previewStart ? previewEnd : trimEnd;
-            var effectiveDuration = GetEffectiveDuration(item.Duration, trimStart, trimEnd);
+            var effectiveDuration = GetEffectiveDuration(sourceDuration, trimStart, trimEnd);
+            var completedExternalStages = 0;
 
             if (EnableDeepFilterNet)
             {
                 try
                 {
+                    var stageStart = GetExternalStageFraction(completedExternalStages, externalStageCount);
+                    var stageEnd = GetExternalStageFraction(completedExternalStages + 1, externalStageCount);
                     processingInputPath = await ProcessWithDeepFilterNetAsync(
                         ffmpegPath,
                         processingInputPath,
                         item.FileName,
                         previewTempDirectory!,
                         progressWindow,
-                        0,
-                        45,
+                        stageStart * 100,
+                        stageEnd * 100,
                         effectiveDuration,
                         trimStart,
                         trimEnd,
                         _processingCancellation.Token);
 
+                    completedExternalStages++;
                     trimStart = null;
                     trimEnd = null;
                     effectiveDuration = await _processor.ProbeDurationAsync(
@@ -1678,9 +2062,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
                 {
+                    completedExternalStages++;
                     item.Status = "AI 失敗，改用 FFmpeg";
+                    RecordAiFallback("DeepFilterNet", item.FileName, ex);
                     StatusText = $"DeepFilterNet 失敗，試聽改用 FFmpeg：{item.FileName}";
                     progressWindow.SetProgress($"AI 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
+                }
+            }
+
+            if (EnableVoiceFixerDereverb)
+            {
+                try
+                {
+                    var stageStart = GetExternalStageFraction(completedExternalStages, externalStageCount);
+                    var stageEnd = GetExternalStageFraction(completedExternalStages + 1, externalStageCount);
+                    processingInputPath = await ProcessWithVoiceFixerAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        item.FileName,
+                        previewTempDirectory!,
+                        progressWindow,
+                        stageStart * 100,
+                        stageEnd * 100,
+                        effectiveDuration,
+                        trimStart,
+                        trimEnd,
+                        _processingCancellation.Token);
+
+                    completedExternalStages++;
+                    trimStart = null;
+                    trimEnd = null;
+                    effectiveDuration = await _processor.ProbeDurationAsync(
+                        ffmpegPath,
+                        processingInputPath,
+                        _processingCancellation.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && FallbackToFfmpegWhenAiFails)
+                {
+                    completedExternalStages++;
+                    item.Status = "VoiceFixer 失敗，改用 FFmpeg";
+                    RecordAiFallback("VoiceFixer", item.FileName, ex);
+                    StatusText = $"VoiceFixer 失敗，試聽改用 FFmpeg：{item.FileName}";
+                    progressWindow.SetProgress($"VoiceFixer 失敗，改用 FFmpeg：{item.FileName}", ProcessingProgress);
                 }
             }
 
@@ -1690,13 +2113,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 EnableDenoise,
                 ReduceRoomTone,
                 ReduceReverb,
+                ReverbReductionAmount,
                 EnhanceVoiceEq,
                 NormalizeLoudness,
                 EnableLimiter,
                 VolumeGainDb,
                 SelectedChannelMode,
                 StereoBalance,
-                previewFolder);
+                previewFolder,
+                DenoiseReductionDb);
 
             var outputPath = FfmpegAudioProcessor.MakeOutputPath(
                 item.FilePath,
@@ -1706,19 +2131,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             var progress = new Progress<AudioProcessingProgress>(current =>
             {
-                var percent = EnableDeepFilterNet ? 45 + (current.Percent * 55) : current.Percent * 100;
+                var ffmpegStart = GetFfmpegStartFraction(externalStageCount);
+                var percent = (ffmpegStart + (current.Percent * (1 - ffmpegStart))) * 100;
                 ProcessingProgress = Math.Clamp(percent, 0, 100);
                 ProcessingProgressText = $"{ProcessingProgress:0}%";
-                progressWindow.SetProgress($"FFmpeg 試聽輸出：{item.FileName}", ProcessingProgress);
+                progressWindow.SetProgress($"{current.Stage ?? "FFmpeg 試聽輸出"}：{item.FileName}", ProcessingProgress);
                 item.Status = $"{ProcessingProgress:0}%";
-                StatusText = $"FFmpeg 試聽輸出：{item.FileName}";
+                StatusText = $"{current.Stage ?? "FFmpeg 試聽輸出"}：{item.FileName}";
             });
 
             await _processor.ProcessAsync(
                 ffmpegPath,
                 processingInputPath,
                 outputPath,
-                options,
+                AvoidRepeatedDenoise(options),
                 effectiveDuration,
                 progress,
                 cancellationToken: _processingCancellation.Token,
@@ -1727,6 +2153,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 trimEnd: trimEnd);
 
             item.ProcessedPath = outputPath;
+            RecordCompletedProcessingTool("FFmpeg");
             item.Status = "試聽完成";
             ProcessingProgress = 100;
             ProcessingProgressText = "100%";
@@ -1751,17 +2178,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         finally
         {
             item.IsProcessing = false;
-            _isProcessing = false;
+            IsProcessing = false;
             _processingCancellation?.Dispose();
             _processingCancellation = null;
             CurrentProcessingFileText = string.Empty;
             IsProgressVisible = false;
-            progressWindow.Close();
+            progressWindow.CompleteAndClose();
 
             if (previewTempDirectory is not null)
             {
                 TryDeleteDirectory(previewTempDirectory);
             }
+            FinishPendingClose();
         }
     }
 
@@ -1789,6 +2217,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         out TimeSpan? trimStart,
         out TimeSpan? trimEnd,
         out string? error)
+        => TryGetTrimRangeForDuration(item, item.Duration, out trimStart, out trimEnd, out error);
+
+    private static bool TryGetTrimRangeForDuration(
+        AudioFileItem item,
+        TimeSpan? sourceDuration,
+        out TimeSpan? trimStart,
+        out TimeSpan? trimEnd,
+        out string? error)
     {
         trimStart = null;
         trimEnd = null;
@@ -1812,19 +2248,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return false;
         }
 
-        if (trimStart is not null && trimEnd is not null && trimEnd <= trimStart)
+        if (trimEnd is not null && trimEnd <= (trimStart ?? TimeSpan.Zero))
         {
             error = "結束時間必須大於開始時間。";
             return false;
         }
 
-        if (item.Duration is not null && trimStart is not null && trimStart >= item.Duration)
+        if (sourceDuration is not null && trimStart is not null && trimStart >= sourceDuration)
         {
             error = "開始時間不能大於或等於音檔長度。";
             return false;
         }
 
-        if (item.Duration is not null && trimEnd is not null && trimEnd > item.Duration)
+        if (sourceDuration is not null && trimEnd is not null && trimEnd > sourceDuration)
         {
             error = "結束時間不能大於音檔長度。";
             return false;
@@ -1846,8 +2282,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
             || double.TryParse(trimmed, NumberStyles.Float, CultureInfo.CurrentCulture, out seconds))
         {
-            value = TimeSpan.FromSeconds(seconds);
-            return true;
+            return TryCreateTime(seconds, out value);
         }
 
         var parts = trimmed.Split(':', StringSplitOptions.TrimEntries);
@@ -1874,7 +2309,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return false;
         }
 
-        value = TimeSpan.FromHours(hours) + TimeSpan.FromMinutes(minutes) + TimeSpan.FromSeconds(parsedSeconds);
+        if (hours < 0 || minutes < 0 || (parts.Length == 3 && minutes >= 60)
+            || !double.IsFinite(parsedSeconds) || parsedSeconds < 0 || parsedSeconds >= 60)
+        {
+            return false;
+        }
+        return TryCreateTime(hours * 3600d + minutes * 60d + parsedSeconds, out value);
+    }
+
+    private static bool TryCreateTime(double seconds, out TimeSpan? value)
+    {
+        value = null;
+        if (!double.IsFinite(seconds) || seconds < 0 || seconds >= TimeSpan.MaxValue.TotalSeconds)
+        {
+            return false;
+        }
+        value = TimeSpan.FromSeconds(seconds);
         return true;
     }
 
@@ -1907,6 +2357,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         TimeSpan? trimStart,
         TimeSpan? trimEnd,
         CancellationToken cancellationToken)
+    {
+        var result = await ProcessAiChannelsAsync(ffmpegPath, inputPath, tempDirectory,
+            startOverallPercent, completeOverallPercent, cancellationToken,
+            (channelMode, start, end) => ProcessDeepFilterNetChannelAsync(ffmpegPath, inputPath,
+                displayName, tempDirectory, progressWindow, start, end, duration,
+                trimStart, trimEnd, cancellationToken, channelMode));
+        _aiDenoiseApplied = true;
+        RecordCompletedProcessingTool("DeepFilterNet");
+        return result;
+    }
+
+    private async Task<string> ProcessDeepFilterNetChannelAsync(
+        string ffmpegPath, string inputPath, string displayName, string tempDirectory,
+        ProcessingProgressWindow progressWindow, double startOverallPercent,
+        double completeOverallPercent, TimeSpan? duration, TimeSpan? trimStart,
+        TimeSpan? trimEnd, CancellationToken cancellationToken, AudioChannelMode channelMode)
     {
         if (string.IsNullOrWhiteSpace(_deepFilterNetPath) || !File.Exists(_deepFilterNetPath))
         {
@@ -1941,17 +2407,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             prepareProgress,
             cancellationToken,
             trimStart,
-            trimEnd);
+            trimEnd,
+            channelMode);
 
         StatusText = $"DeepFilterNet AI 降噪：{displayName}";
-        progressWindow.SetProgress($"AI 降噪：{displayName}", Math.Clamp(startOverallPercent + (totalRange * 0.35d), 0, 100));
+        ProcessingProgress = Math.Clamp(startOverallPercent + (totalRange * 0.35d), 0, 100);
+        ProcessingProgressText = "AI 處理中";
+        progressWindow.SetIndeterminate("AI 降噪中", displayName);
 
         var deepFilteredPath = await _deepFilterNetProcessor.ProcessAsync(
             _deepFilterNetPath,
             preparedInputPath,
             outputDirectory,
             EnableDeepFilterNetPostFilter,
-            cancellationToken);
+            cancellationToken,
+            AiAttenuationLimitDb);
 
         ProcessingProgress = Math.Clamp(completeOverallPercent, 0, 100);
         ProcessingProgressText = $"{ProcessingProgress:0}%";
@@ -1959,10 +2429,190 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return deepFilteredPath;
     }
 
+    private async Task<string> ProcessWithVoiceFixerAsync(
+        string ffmpegPath,
+        string inputPath,
+        string displayName,
+        string tempDirectory,
+        ProcessingProgressWindow progressWindow,
+        double startOverallPercent,
+        double completeOverallPercent,
+        TimeSpan? duration,
+        TimeSpan? trimStart,
+        TimeSpan? trimEnd,
+        CancellationToken cancellationToken)
+    {
+        var result = await ProcessAiChannelsAsync(ffmpegPath, inputPath, tempDirectory,
+            startOverallPercent, completeOverallPercent, cancellationToken,
+            (channelMode, start, end) => ProcessVoiceFixerChannelAsync(ffmpegPath, inputPath,
+                displayName, tempDirectory, progressWindow, start, end, duration,
+                trimStart, trimEnd, cancellationToken, channelMode));
+        _aiDenoiseApplied = _aiDenoiseApplied || VoiceFixerMix > 0;
+        if (VoiceFixerMix > 0) RecordCompletedProcessingTool("VoiceFixer");
+        return result;
+    }
+
+    private async Task<string> ProcessVoiceFixerChannelAsync(
+        string ffmpegPath, string inputPath, string displayName, string tempDirectory,
+        ProcessingProgressWindow progressWindow, double startOverallPercent,
+        double completeOverallPercent, TimeSpan? duration, TimeSpan? trimStart,
+        TimeSpan? trimEnd, CancellationToken cancellationToken, AudioChannelMode channelMode)
+    {
+        if (string.IsNullOrWhiteSpace(_voiceFixerPath) || !File.Exists(_voiceFixerPath))
+        {
+            throw new InvalidOperationException("已勾選 VoiceFixer 免費去殘響，但找不到 voicefixer.exe / voicefixer.cmd。");
+        }
+
+        var inputDirectory = Path.Combine(tempDirectory, "voicefixer_input");
+        var outputDirectory = Path.Combine(tempDirectory, "voicefixer_output");
+        Directory.CreateDirectory(inputDirectory);
+        Directory.CreateDirectory(outputDirectory);
+
+        var baseName = Path.GetFileNameWithoutExtension(displayName);
+        var preparedInputPath = Path.Combine(inputDirectory, $"{baseName}_{Guid.NewGuid():N}.wav");
+        var outputPath = Path.Combine(outputDirectory, $"{baseName}_{Guid.NewGuid():N}_voicefixer.wav");
+        var totalRange = Math.Max(completeOverallPercent - startOverallPercent, 0);
+
+        StatusText = $"VoiceFixer 準備：{displayName}";
+        CurrentProcessingFileText = displayName;
+
+        var prepareProgress = new Progress<AudioProcessingProgress>(current =>
+        {
+            var overallPercent = Math.Clamp(startOverallPercent + (totalRange * 0.35d * current.Percent), 0, 100);
+            ProcessingProgress = overallPercent;
+            ProcessingProgressText = $"{overallPercent:0}%";
+            progressWindow.SetProgress($"準備 VoiceFixer 音檔：{displayName}", overallPercent);
+        });
+
+        await _processor.PrepareVoiceFixerInputAsync(
+            ffmpegPath,
+            inputPath,
+            preparedInputPath,
+            duration,
+            prepareProgress,
+            cancellationToken,
+            trimStart,
+            trimEnd,
+            channelMode);
+
+        if (VoiceFixerMix <= 0) return preparedInputPath;
+        StatusText = $"VoiceFixer 人聲修復：{displayName}";
+        ProcessingProgress = Math.Clamp(startOverallPercent + (totalRange * 0.35d), 0, 100);
+        ProcessingProgressText = "VoiceFixer 處理中";
+        progressWindow.SetIndeterminate($"VoiceFixer 模式 {VoiceFixerMode} 處理中", displayName);
+
+        var fixedPath = await _voiceFixerProcessor.ProcessAsync(
+            _voiceFixerPath,
+            preparedInputPath,
+            outputPath,
+            VoiceFixerMode,
+            cancellationToken);
+
+        if (VoiceFixerMix < 1)
+        {
+            progressWindow.SetIndeterminate("對齊與混合原音", displayName);
+            var mixedPath = Path.Combine(outputDirectory, $"{baseName}_{Guid.NewGuid():N}_blend.wav");
+            var blend = await _audioBlendProcessor.BlendAsync(ffmpegPath, preparedInputPath,
+                fixedPath, mixedPath, VoiceFixerMix, cancellationToken);
+            fixedPath = blend.Path;
+            if (blend.Warning is not null)
+            {
+                RecordProcessingWarning("VoiceFixer", displayName, blend.Warning);
+            }
+        }
+
+        ProcessingProgress = Math.Clamp(completeOverallPercent, 0, 100);
+        ProcessingProgressText = $"{ProcessingProgress:0}%";
+        progressWindow.SetProgress($"VoiceFixer 完成：{displayName}", ProcessingProgress);
+        return fixedPath;
+    }
+
+    private async Task<string> ProcessAiChannelsAsync(
+        string ffmpegPath, string inputPath, string tempDirectory,
+        double startPercent, double endPercent, CancellationToken cancellationToken,
+        Func<AudioChannelMode, double, double, Task<string>> processChannel)
+    {
+        var mode = SelectedChannelMode;
+        if (mode.Value is not ("keep" or "balance"))
+        {
+            return await processChannel(mode, startPercent, endPercent);
+        }
+
+        var channels = await _processor.ProbeAudioChannelsAsync(ffmpegPath, inputPath, cancellationToken);
+        if (channels == 1)
+        {
+            return await processChannel(FfmpegAudioProcessor.KeepOriginalChannelMode, startPercent, endPercent);
+        }
+        if (channels != 2)
+        {
+            throw new InvalidOperationException("AI 保留聲道目前支援 Mono / Stereo，請先選擇左右混合置中處理多聲道音檔。");
+        }
+
+        var middlePercent = (startPercent + endPercent) / 2;
+        var left = await processChannel(new AudioChannelMode("左聲道", "left_only"), startPercent, middlePercent);
+        var right = await processChannel(new AudioChannelMode("右聲道", "right_only"), middlePercent, endPercent);
+        var outputPath = Path.Combine(tempDirectory, $"stereo_{Guid.NewGuid():N}.wav");
+        await _processor.RestoreStereoAsync(ffmpegPath, left, right, outputPath, cancellationToken);
+        return outputPath;
+    }
+
+    private int CountExternalPreprocessStages()
+    {
+        var count = 0;
+        if (EnableDeepFilterNet)
+        {
+            count++;
+        }
+
+        if (EnableVoiceFixerDereverb)
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    private static double GetFfmpegStartFraction(int externalStageCount)
+    {
+        return externalStageCount switch
+        {
+            0 => 0,
+            1 => 0.45,
+            _ => 0.65
+        };
+    }
+
+    private static double GetExternalStageFraction(int completedStageCount, int externalStageCount)
+    {
+        if (externalStageCount <= 0)
+        {
+            return 0;
+        }
+
+        return GetFfmpegStartFraction(externalStageCount) * completedStageCount / externalStageCount;
+    }
+
     private IReadOnlyList<ComparisonPreset> CreateComparisonPresets()
+        => CreateComparisonPresetsForOptions(new AudioProcessingOptions(
+            SilenceSeconds, SilenceThresholdDb, EnableDenoise, ReduceRoomTone, ReduceReverb,
+            ReverbReductionAmount, EnhanceVoiceEq, NormalizeLoudness, EnableLimiter,
+            VolumeGainDb, SelectedChannelMode, StereoBalance, _outputFolder ?? string.Empty, DenoiseReductionDb));
+
+    private static IReadOnlyList<ComparisonPreset> CreateComparisonPresetsForOptions(AudioProcessingOptions currentOptions)
     {
         return
         [
+            new(
+                "原音（只剪輯）",
+                "ab_original",
+                CreateProcessingOptions(0.1, -35, false, false, false,
+                    FfmpegAudioProcessor.DefaultReverbReductionAmount, false, false, false, 0,
+                    FfmpegAudioProcessor.KeepOriginalChannelMode) with { RemoveSilence = false },
+                UseOriginalInput: true),
+            new(
+                "目前設定",
+                "ab_current",
+                currentOptions),
             new(
                 "一般 Podcast",
                 "ab_podcast",
@@ -1972,6 +2622,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     enableDenoise: true,
                     reduceRoomTone: true,
                     reduceReverb: false,
+                    reverbReductionAmount: FfmpegAudioProcessor.DefaultReverbReductionAmount,
                     enhanceVoiceEq: true,
                     normalizeLoudness: true,
                     enableLimiter: true,
@@ -1985,12 +2636,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     enableDenoise: true,
                     reduceRoomTone: true,
                     reduceReverb: true,
+                    reverbReductionAmount: 0.8,
                     enhanceVoiceEq: false,
                     normalizeLoudness: true,
                     enableLimiter: true,
                     volumeGainDb: 0)),
             new(
-                "去殘響",
+                "空間感抑制",
                 "ab_dereverb",
                 CreateProcessingOptions(
                     silenceSeconds: 0.3,
@@ -1998,6 +2650,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     enableDenoise: true,
                     reduceRoomTone: true,
                     reduceReverb: true,
+                    reverbReductionAmount: 0.6,
                     enhanceVoiceEq: true,
                     normalizeLoudness: true,
                     enableLimiter: true,
@@ -2011,52 +2664,42 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     enableDenoise: true,
                     reduceRoomTone: true,
                     reduceReverb: false,
+                    reverbReductionAmount: FfmpegAudioProcessor.DefaultReverbReductionAmount,
                     enhanceVoiceEq: true,
                     normalizeLoudness: true,
                     enableLimiter: true,
-                    volumeGainDb: 1.5)),
-            new(
-                "只剪輯",
-                "ab_trim_only",
-                CreateProcessingOptions(
-                    silenceSeconds: 0.1,
-                    silenceThresholdDb: -35,
-                    enableDenoise: false,
-                    reduceRoomTone: false,
-                    reduceReverb: false,
-                    enhanceVoiceEq: false,
-                    normalizeLoudness: false,
-                    enableLimiter: false,
-                    volumeGainDb: 0,
-                    FfmpegAudioProcessor.KeepOriginalChannelMode))
+                    volumeGainDb: 1.5))
         ];
-    }
 
-    private AudioProcessingOptions CreateProcessingOptions(
-        double silenceSeconds,
-        double silenceThresholdDb,
-        bool enableDenoise,
-        bool reduceRoomTone,
-        bool reduceReverb,
-        bool enhanceVoiceEq,
-        bool normalizeLoudness,
-        bool enableLimiter,
-        double volumeGainDb,
-        AudioChannelMode? channelMode = null)
-    {
-        return new AudioProcessingOptions(
-            silenceSeconds,
-            silenceThresholdDb,
-            enableDenoise,
-            reduceRoomTone,
-            reduceReverb,
-            enhanceVoiceEq,
-            normalizeLoudness,
-            enableLimiter,
-            volumeGainDb,
-            channelMode ?? FfmpegAudioProcessor.DefaultPodcastChannelMode,
-            0,
-            _outputFolder ?? string.Empty);
+        AudioProcessingOptions CreateProcessingOptions(
+            double silenceSeconds,
+            double silenceThresholdDb,
+            bool enableDenoise,
+            bool reduceRoomTone,
+            bool reduceReverb,
+            double reverbReductionAmount,
+            bool enhanceVoiceEq,
+            bool normalizeLoudness,
+            bool enableLimiter,
+            double volumeGainDb,
+            AudioChannelMode? channelMode = null)
+        {
+            return new AudioProcessingOptions(
+                silenceSeconds,
+                silenceThresholdDb,
+                enableDenoise,
+                reduceRoomTone,
+                reduceReverb,
+                reverbReductionAmount,
+                enhanceVoiceEq,
+                normalizeLoudness,
+                enableLimiter,
+                volumeGainDb,
+                channelMode ?? FfmpegAudioProcessor.DefaultPodcastChannelMode,
+                0,
+                currentOptions.OutputFolder,
+                currentOptions.DenoiseReductionDb);
+        }
     }
 
     private void ShowComparisonSummary(string comparisonFolder, IReadOnlyList<string> outputs)
@@ -2074,6 +2717,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         System.Windows.MessageBox.Show(this, message.ToString(), "A/B 比較", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private async Task<string> EnsureOutputEncoderAsync(string ffmpegPath, ProcessingProgressWindow progressWindow,
+        CancellationToken cancellationToken)
+    {
+        progressWindow.SetIndeterminate("檢查輸出格式", SelectedOutputFormat.DisplayName);
+        var encoder = SelectedOutputFormat.AudioCodec;
+        if (await _processor.HasAudioEncoderAsync(ffmpegPath, encoder, cancellationToken)) return ffmpegPath;
+        var bundled = FfmpegAudioProcessor.TryFindBundledFfmpeg();
+        if (bundled is not null && !string.Equals(Path.GetFullPath(ffmpegPath), Path.GetFullPath(bundled), StringComparison.OrdinalIgnoreCase)
+            && await _processor.HasAudioEncoderAsync(bundled, encoder, cancellationToken))
+        {
+            _ffmpegPath = bundled;
+            OnPropertyChanged(nameof(FfmpegPathText));
+            RecordProcessingWarning("FFmpeg", "輸出工具", $"原指定工具不支援 {encoder}，本次改用專案 FFmpeg：{bundled}");
+            return bundled;
+        }
+        throw new InvalidOperationException($"目前 FFmpeg 不支援 {SelectedOutputFormat.DisplayName}（{encoder}）。請指定支援此格式的 FFmpeg。");
     }
 
     private List<string> ValidateProcessingInputs(
@@ -2110,6 +2771,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             errors.Add("已勾選 DeepFilterNet AI 降噪，但找不到 deep-filter.exe。");
         }
 
+        if (EnableVoiceFixerDereverb && VoiceFixerMix > 0
+            && (string.IsNullOrWhiteSpace(_voiceFixerPath) || !File.Exists(_voiceFixerPath)))
+        {
+            errors.Add("已勾選 VoiceFixer 免費去殘響，但找不到 voicefixer.exe / voicefixer.cmd。");
+        }
+
         if (!string.IsNullOrWhiteSpace(_introAudioPath) && !File.Exists(_introAudioPath))
         {
             errors.Add("片頭音檔不存在，請重新選擇或清除片頭。");
@@ -2133,7 +2800,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 continue;
             }
 
-            if (!TryGetTrimRange(item, out _, out _, out var trimError))
+            if (!TryGetTrimRangeForDuration(item, UseAiProcessedAudio ? null : item.Duration,
+                out _, out _, out var trimError))
             {
                 errors.Add($"{item.FileName}：{trimError}");
             }
@@ -2184,6 +2852,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (!string.IsNullOrWhiteSpace(summary.OutputPath))
         {
             message.AppendLine($"最後輸出：{summary.OutputPath}");
+        }
+        if (_processingWarnings.Count > 0)
+        {
+            message.AppendLine().AppendLine("AI 處理警告（已使用備援流程）：");
+            foreach (var warning in _processingWarnings.Take(5))
+            {
+                message.AppendLine(warning);
+            }
         }
 
         if (failedCount > 0)
@@ -2256,7 +2932,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task AnalyzeAudioAsync(AudioFileItem item, string path, string label)
     {
-        if (_isAnalyzing)
+        if (!CanStartWork)
         {
             StatusText = "目前正在分析音檔。";
             return;
@@ -2278,15 +2954,65 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         try
         {
             IsAnalyzing = true;
+            _analysisCancellation = new CancellationTokenSource();
             AnalysisText = $"正在分析 {label}：{Path.GetFileName(path)}";
             StatusText = $"正在分析：{Path.GetFileName(path)}";
+
+            var progressWindow = new ProcessingProgressWindow
+            {
+                Owner = this
+            };
+            progressWindow.CancelRequested += (_, _) => _analysisCancellation?.Cancel();
+            progressWindow.Show();
+
+            var progress = new Progress<AudioAnalysisProgress>(current =>
+            {
+                var percent = Math.Clamp(current.Percent * 100, 0, 100);
+                ProcessingProgress = percent;
+                ProcessingProgressText = current.Percent is > 0.05 and < 1
+                    ? "分析中"
+                    : $"{percent:0}%";
+                if (current.Percent is > 0.05 and < 1)
+                {
+                    progressWindow.SetIndeterminate(current.Stage, Path.GetFileName(path));
+                }
+                else
+                {
+                    progressWindow.SetProgress($"{current.Stage}：{Path.GetFileName(path)}", percent);
+                }
+
+                StatusText = $"{current.Stage}：{Path.GetFileName(path)}";
+            });
 
             var duration = string.Equals(path, item.FilePath, StringComparison.OrdinalIgnoreCase)
                 ? item.Duration
                 : null;
-            var analysis = await _processor.AnalyzeQualityAsync(ffmpegPath, path, duration);
-            AnalysisText = FormatAnalysisText(label, path, analysis);
-            StatusText = $"分析完成：{Path.GetFileName(path)}";
+
+            try
+            {
+                IsProgressVisible = true;
+                ProcessingProgress = 0;
+                ProcessingProgressText = "0%";
+                CurrentProcessingFileText = Path.GetFileName(path);
+
+                var analysis = await _processor.AnalyzeQualityAsync(
+                    ffmpegPath,
+                    path,
+                    duration,
+                    progress,
+                    _analysisCancellation.Token);
+                AnalysisText = FormatAnalysisText(label, path, analysis);
+                StatusText = $"分析完成：{Path.GetFileName(path)}";
+            }
+            finally
+            {
+                progressWindow.CompleteAndClose();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            AnalysisText = "分析已取消。";
+            StatusText = "分析已取消。";
         }
         catch (Exception ex)
         {
@@ -2296,19 +3022,87 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         finally
         {
             IsAnalyzing = false;
+            _analysisCancellation?.Dispose();
+            _analysisCancellation = null;
+            CurrentProcessingFileText = string.Empty;
+            IsProgressVisible = false;
+            FinishPendingClose();
         }
+    }
+
+    private void FinishPendingClose()
+    {
+        if (_closeAfterWork && CanStartWork)
+        {
+            Dispatcher.BeginInvoke(new Action(Close));
+        }
+    }
+
+    private void RecordAiFallback(string tool, string fileName, Exception error)
+        => RecordProcessingWarning(tool, fileName, $"執行失敗，使用目前音源接續 FFmpeg 後製。{error.Message}");
+
+    private void RecordProcessingWarning(string tool, string fileName, string message)
+    {
+        _processingWarningCount++;
+        var warning = $"{tool} / {fileName}：{message}";
+        if (_processingWarnings.Count < 20)
+        {
+            _processingWarnings.Add(warning);
+        }
+        if (_processingReportItem is not null)
+            _processingReportItem.ProcessingWarningsText = warning;
+        NotifyProcessingReportChanged();
+    }
+
+    private void RecordCompletedProcessingTool(string tool)
+    {
+        if (!_completedProcessingTools.Contains(tool)) _completedProcessingTools.Add(tool);
+        if (_processingReportItem is not null)
+            _processingReportItem.ProcessingToolsText = "已完成階段：" + string.Join(" → ", _completedProcessingTools);
+        OnPropertyChanged(nameof(ProcessingToolsText));
+    }
+
+    private void NotifyProcessingReportChanged()
+    {
+        OnPropertyChanged(nameof(ProcessingWarningsText));
+        OnPropertyChanged(nameof(HasProcessingWarnings));
+        OnPropertyChanged(nameof(ProcessingWarningSummary));
+        OnPropertyChanged(nameof(ProcessingToolsText));
     }
 
     private string GetProcessingInputPath(AudioFileItem item)
     {
+        _aiDenoiseApplied = false;
+        _processingReportItem = item;
+        _completedProcessingTools.Clear();
+        item.ProcessingWarningsText = string.Empty;
+        item.ProcessingToolsText = string.Empty;
         if (!UseAiProcessedAudio)
         {
+            RecordCompletedProcessingTool("原始音檔");
             return item.FilePath;
         }
 
         var aiPath = FfmpegAudioProcessor.FindAiProcessedAudio(item.FilePath, _aiAudioFolder);
+        RecordCompletedProcessingTool(aiPath is null ? "原始音檔" : "外部 AI 音檔");
+        if (aiPath is null)
+            RecordProcessingWarning("外部 AI 配對", item.FileName, "找不到對應 AI 音檔，改用原始音檔。");
         return aiPath ?? item.FilePath;
     }
+
+    private async Task<TimeSpan?> GetProcessingDurationAsync(string ffmpegPath, AudioFileItem item,
+        string inputPath, CancellationToken cancellationToken)
+    {
+        var duration = await _processor.ProbeDurationAsync(ffmpegPath, inputPath, cancellationToken);
+        var isOriginal = string.Equals(Path.GetFullPath(inputPath), Path.GetFullPath(item.FilePath),
+            StringComparison.OrdinalIgnoreCase);
+        if (!isOriginal) return duration;
+        item.Duration = duration ?? item.Duration;
+        return item.Duration;
+    }
+
+    private AudioProcessingOptions AvoidRepeatedDenoise(AudioProcessingOptions options)
+        => options with { EnableDenoise = options.EnableDenoise && !_aiDenoiseApplied };
 
     private void LoadSettings()
     {
@@ -2338,16 +3132,25 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _outroAudioPath = settings.OutroAudioPath;
             _coverImagePath = settings.CoverImagePath;
             _deepFilterNetPath = settings.DeepFilterNetPath;
+            _voiceFixerPath = settings.VoiceFixerPath;
 
             SilenceSeconds = settings.SilenceSeconds;
             SilenceThresholdDb = settings.SilenceThresholdDb;
             EnableDenoise = settings.EnableDenoise;
+            DenoiseStrengthIndex = settings.DenoiseStrengthIndex;
+            VoiceFixerMix = settings.VoiceFixerMix;
+            MatchComparisonLoudness = settings.MatchComparisonLoudness;
             UseAiProcessedAudio = settings.UseAiProcessedAudio;
             EnableDeepFilterNet = settings.EnableDeepFilterNet;
             EnableDeepFilterNetPostFilter = settings.EnableDeepFilterNetPostFilter;
             FallbackToFfmpegWhenAiFails = settings.FallbackToFfmpegWhenAiFails;
+            EnableVoiceFixerDereverb = settings.EnableVoiceFixerDereverb;
+            VoiceFixerMode = settings.VoiceFixerMode;
             ReduceRoomTone = settings.ReduceRoomTone;
             ReduceReverb = settings.ReduceReverb;
+            ReverbReductionAmount = settings.ReverbReductionAmount <= 0
+                ? FfmpegAudioProcessor.DefaultReverbReductionAmount
+                : settings.ReverbReductionAmount;
             EnhanceVoiceEq = settings.EnhanceVoiceEq;
             NormalizeLoudness = settings.NormalizeLoudness;
             EnableLimiter = settings.EnableLimiter;
@@ -2380,6 +3183,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             OnPropertyChanged(nameof(CoverImageText));
             OnPropertyChanged(nameof(DeepFilterNetPathText));
             OnPropertyChanged(nameof(DeepFilterNetStatusText));
+            OnPropertyChanged(nameof(VoiceFixerPathText));
+            OnPropertyChanged(nameof(VoiceFixerStatusText));
         }
         catch (JsonException)
         {
@@ -2409,15 +3214,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 OutroAudioPath = _outroAudioPath,
                 CoverImagePath = _coverImagePath,
                 DeepFilterNetPath = _deepFilterNetPath,
+                VoiceFixerPath = _voiceFixerPath,
                 SilenceSeconds = SilenceSeconds,
                 SilenceThresholdDb = SilenceThresholdDb,
                 EnableDenoise = EnableDenoise,
+                DenoiseStrengthIndex = DenoiseStrengthIndex,
+                VoiceFixerMix = VoiceFixerMix,
+                MatchComparisonLoudness = MatchComparisonLoudness,
                 UseAiProcessedAudio = UseAiProcessedAudio,
                 EnableDeepFilterNet = EnableDeepFilterNet,
                 EnableDeepFilterNetPostFilter = EnableDeepFilterNetPostFilter,
                 FallbackToFfmpegWhenAiFails = FallbackToFfmpegWhenAiFails,
+                EnableVoiceFixerDereverb = EnableVoiceFixerDereverb,
+                VoiceFixerMode = VoiceFixerMode,
                 ReduceRoomTone = ReduceRoomTone,
                 ReduceReverb = ReduceReverb,
+                ReverbReductionAmount = ReverbReductionAmount,
                 EnhanceVoiceEq = EnhanceVoiceEq,
                 NormalizeLoudness = NormalizeLoudness,
                 EnableLimiter = EnableLimiter,
@@ -2788,7 +3600,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private sealed record ComparisonPreset(
         string DisplayName,
         string FileSuffix,
-        AudioProcessingOptions Options);
+        AudioProcessingOptions Options,
+        bool UseOriginalInput = false);
 
     private sealed class AppSettings
     {
@@ -2808,11 +3621,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         public string? DeepFilterNetPath { get; set; }
 
+        public string? VoiceFixerPath { get; set; }
+
         public double SilenceSeconds { get; set; } = 0.1;
 
         public double SilenceThresholdDb { get; set; } = -35;
 
         public bool EnableDenoise { get; set; } = true;
+        public int DenoiseStrengthIndex { get; set; } = 1;
+        public double VoiceFixerMix { get; set; } = 0.6;
+        public bool MatchComparisonLoudness { get; set; } = true;
 
         public bool UseAiProcessedAudio { get; set; }
 
@@ -2822,9 +3640,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         public bool FallbackToFfmpegWhenAiFails { get; set; } = true;
 
+        public bool EnableVoiceFixerDereverb { get; set; }
+
+        public int VoiceFixerMode { get; set; }
+
         public bool ReduceRoomTone { get; set; }
 
         public bool ReduceReverb { get; set; }
+
+        public double ReverbReductionAmount { get; set; } = 0.6;
 
         public bool EnhanceVoiceEq { get; set; }
 

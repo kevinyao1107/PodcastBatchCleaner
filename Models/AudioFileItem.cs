@@ -13,6 +13,8 @@ public sealed class AudioFileItem : INotifyPropertyChanged
     private string _customOutputFileName = string.Empty;
     private string _trimStartText = string.Empty;
     private string _trimEndText = string.Empty;
+    private string _processingToolsText = string.Empty;
+    private string _processingWarningsText = string.Empty;
 
     public required string FilePath { get; init; }
 
@@ -27,6 +29,27 @@ public sealed class AudioFileItem : INotifyPropertyChanged
     }
 
     public string DurationText => Duration is null ? "--:--" : FormatTime(Duration.Value);
+
+    public string ProcessingToolsText
+    {
+        get => _processingToolsText;
+        set
+        {
+            if (SetField(ref _processingToolsText, value)) OnPropertyChanged(nameof(ProcessingDetailsText));
+        }
+    }
+
+    public string ProcessingWarningsText
+    {
+        get => _processingWarningsText;
+        set
+        {
+            if (SetField(ref _processingWarningsText, value)) OnPropertyChanged(nameof(ProcessingDetailsText));
+        }
+    }
+
+    public string ProcessingDetailsText => string.Join(Environment.NewLine,
+        new[] { ProcessingToolsText, ProcessingWarningsText }.Where(text => !string.IsNullOrWhiteSpace(text)));
 
     public string Status
     {

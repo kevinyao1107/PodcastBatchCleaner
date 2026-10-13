@@ -47,3 +47,4 @@ processed/
 
 # Local third-party tools
 tools/DeepFilterNet/deep-filter.exe
+tools/FFmpeg/*.exe

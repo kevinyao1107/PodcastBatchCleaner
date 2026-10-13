@@ -97,7 +97,7 @@
 
         <Style TargetType="ComboBox">
             <Setter Property="MinHeight" Value="32" />
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Foreground" Value="#101828" />
             <Setter Property="Background" Value="{StaticResource InputBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrushDark}" />
         </Style>
@@ -144,10 +144,14 @@
                                 <Setter Property="Background" Value="{StaticResource AccentBrush}" />
                                 <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
                             </Trigger>
-                            <Trigger Property="IsMouseOver" Value="True">
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsMouseOver" Value="True" />
+                                    <Condition Property="IsSelected" Value="False" />
+                                </MultiTrigger.Conditions>
                                 <Setter Property="Background" Value="{StaticResource ButtonHoverBrush}" />
                                 <Setter Property="BorderBrush" Value="{StaticResource BorderBrushDark}" />
-                            </Trigger>
+                            </MultiTrigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
@@ -159,6 +163,7 @@
         </Style>
 
         <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
             <Setter Property="FontSize" Value="14" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Margin" Value="0,18,0,10" />
@@ -235,7 +240,7 @@
                 </Grid.ColumnDefinitions>
 
                 <WrapPanel>
-                    <Button Click="SelectFolder_Click" Content="選取資料夾" />
+                    <Button Click="SelectFolder_Click" Content="選取資料夾" IsEnabled="{Binding CanStartWork}" />
                 </WrapPanel>
 
                 <TextBlock Grid.Column="1"
@@ -247,19 +252,36 @@
 
                 <WrapPanel Grid.Column="2" HorizontalAlignment="Right">
                     <Button Click="ProcessSelected_Click"
+                            IsEnabled="{Binding CanStartWork}"
                             Content="處理選取"
                             Background="{StaticResource AccentBrush}"
                             BorderBrush="{StaticResource AccentBrush}"
                             Foreground="#07100E" />
                     <Button Click="ProcessAll_Click"
+                            IsEnabled="{Binding CanStartWork}"
                             Content="全部輸出"
                             Background="{StaticResource AccentBrush}"
                             BorderBrush="{StaticResource AccentBrush}"
                             Foreground="#07100E" />
-                    <Button Click="CancelProcessing_Click" Content="取消" />
+                    <Button Click="CancelProcessing_Click" Content="取消" IsEnabled="{Binding IsProcessing}" />
                 </WrapPanel>
             </Grid>
         </Border>
+
+        <StackPanel DockPanel.Dock="Top">
+            <TextBlock Margin="14,8" Text="{Binding ProcessingToolsText}"
+                       TextTrimming="CharacterEllipsis" ToolTip="{Binding ProcessingToolsText}"
+                       Foreground="{StaticResource MutedTextBrush}" />
+            <Border x:Name="ProcessingWarningBanner" Background="#282315"
+                    BorderBrush="#6B5529" BorderThickness="0,1,0,1" Padding="14,8"
+                    Visibility="{Binding HasProcessingWarnings, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <Expander Header="{Binding ProcessingWarningSummary}" Foreground="#F4C96B">
+                    <TextBox Margin="0,8,0,0" MaxHeight="120" IsReadOnly="True"
+                             TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
+                             Text="{Binding ProcessingWarningsText, Mode=OneWay}" />
+                </Expander>
+            </Border>
+        </StackPanel>
 
         <Border DockPanel.Dock="Bottom"
                 Height="38"
@@ -341,11 +363,13 @@
                                     MinHeight="28"
                                     Padding="10,4"
                                     Click="MoveSelectedUp_Click"
+                                    IsEnabled="{Binding CanStartWork}"
                                     Content="上移" />
                             <Button Grid.Column="2"
                                     MinHeight="28"
                                     Padding="10,4"
                                     Click="MoveSelectedDown_Click"
+                                    IsEnabled="{Binding CanStartWork}"
                                     Content="下移" />
                             <Button Grid.Column="3"
                                     MinHeight="28"
@@ -360,6 +384,7 @@
                     </Border>
 
                     <ListView x:Name="AudioList"
+                              IsEnabled="{Binding CanStartWork}"
                               Grid.Row="1"
                               AllowDrop="True"
                               ItemsSource="{Binding AudioFiles}"
@@ -373,7 +398,13 @@
                             <GridView>
                                 <GridViewColumn Width="180" Header="檔名" DisplayMemberBinding="{Binding FileName}" />
                                 <GridViewColumn Width="68" Header="長度" DisplayMemberBinding="{Binding DurationText}" />
-                                <GridViewColumn Width="90" Header="狀態" DisplayMemberBinding="{Binding Status}" />
+                                <GridViewColumn Width="90" Header="狀態">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Status}" ToolTip="{Binding ProcessingDetailsText}" />
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
                                 <GridViewColumn Width="82" Header="開始">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
@@ -420,7 +451,7 @@
                     CornerRadius="12"
                     Padding="14">
                 <TabControl>
-                    <TabItem Header="處理">
+                    <TabItem Header="快速處理" IsEnabled="{Binding CanStartWork}">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="0,14,12,0">
                                 <TextBlock FontSize="18"
@@ -447,6 +478,8 @@
                                     <Button Click="PreviewSelected_Click" Content="30秒試聽" />
                                     <Button Click="CompareSelected_Click" Content="A/B 比較" />
                                 </WrapPanel>
+                                <CheckBox Content="A/B 等音量比較"
+                                          IsChecked="{Binding MatchComparisonLoudness, Mode=TwoWay}" />
 
                                 <TextBlock Style="{StaticResource FieldLabelStyle}" Text="空拍超過多久刪除（0.1 - 1.0 秒）" />
                                 <Grid>
@@ -496,42 +529,93 @@
                         </ScrollViewer>
                     </TabItem>
 
-                    <TabItem Header="AI / 音質">
+                    <TabItem Header="AI / 修復" IsEnabled="{Binding CanStartWork}">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="0,14,12,0">
                                 <TextBlock FontSize="18"
                                            FontWeight="SemiBold"
-                                           Text="AI / 音質" />
+                                           Text="AI / 修復" />
 
                                 <TextBlock Style="{StaticResource SectionTitleStyle}" Text="AI 降噪" />
+                                <TextBlock Style="{StaticResource FieldLabelStyle}" Text="降噪強度" />
+                                <ComboBox x:Name="DenoiseStrengthSelector" IsEnabled="{Binding IsDenoiseStrengthEnabled}"
+                                          SelectedIndex="{Binding DenoiseStrengthIndex, Mode=TwoWay}">
+                                    <ComboBoxItem Content="輕度" />
+                                    <ComboBoxItem Content="標準" />
+                                    <ComboBoxItem Content="強力" />
+                                </ComboBox>
                                 <CheckBox Margin="0,0,0,0"
                                   VerticalContentAlignment="Center"
                                   Content="使用 AI 處理後音檔"
                                   IsChecked="{Binding UseAiProcessedAudio, Mode=TwoWay}" />
+                                <WrapPanel Margin="0,8,0,0">
+                                    <Button Click="ChooseAiAudioFolder_Click" Content="AI 音檔資料夾" />
+                                </WrapPanel>
+                                <TextBlock Style="{StaticResource MetaTextStyle}"
+                                           Text="{Binding AiAudioFolderText}"
+                                           TextWrapping="Wrap" />
 
                         <CheckBox Margin="0,10,0,0"
                                   VerticalContentAlignment="Center"
                                   Content="DeepFilterNet AI 降噪"
                                   IsChecked="{Binding EnableDeepFilterNet, Mode=TwoWay}" />
 
-                        <CheckBox Margin="18,8,0,0"
+                        <CheckBox x:Name="DeepFilterPostFilterCheckBox" Margin="18,8,0,0"
                                   VerticalContentAlignment="Center"
                                   Content="DeepFilterNet PostFilter"
+                                  IsEnabled="{Binding EnableDeepFilterNet}"
                                   IsChecked="{Binding EnableDeepFilterNetPostFilter, Mode=TwoWay}" />
 
-                        <CheckBox Margin="18,8,0,0"
+                        <CheckBox x:Name="AiFallbackCheckBox" Margin="18,8,0,0"
                                   VerticalContentAlignment="Center"
                                   Content="AI 失敗改用 FFmpeg"
+                                  IsEnabled="{Binding IsAiFallbackEnabled}"
                                   IsChecked="{Binding FallbackToFfmpegWhenAiFails, Mode=TwoWay}" />
 
                         <TextBlock Style="{StaticResource MetaTextStyle}"
                                    Text="{Binding DeepFilterNetStatusText}" />
                         <TextBlock Style="{StaticResource MetaTextStyle}"
-                                   Text="{Binding DeepFilterNetPathText}" />
+                                   Text="{Binding DeepFilterNetPathText}" TextWrapping="Wrap" />
                         <WrapPanel Margin="0,8,0,0">
                             <Button Click="ChooseDeepFilterNet_Click" Content="指定 DFN" />
                             <Button Margin="8,0,0,0"
                                     Click="ClearDeepFilterNet_Click"
+                                    Content="清除" />
+                        </WrapPanel>
+
+                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="免費人聲修復 / 去殘響" />
+                        <CheckBox Margin="0,0,0,0"
+                                  VerticalContentAlignment="Center"
+                                  Content="VoiceFixer 人聲修復"
+                                  IsChecked="{Binding EnableVoiceFixerDereverb, Mode=TwoWay}" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="VoiceFixer 模式" />
+                        <ComboBox x:Name="VoiceFixerModeSelector" IsEnabled="{Binding IsVoiceFixerModeEnabled}"
+                                  SelectedIndex="{Binding VoiceFixerMode, Mode=TwoWay}">
+                            <ComboBoxItem Content="0 - 標準模型" />
+                            <ComboBoxItem Content="1 - 加強預處理" />
+                            <ComboBoxItem Content="2 - 訓練模式" />
+                        </ComboBox>
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="人聲修復混合比例" />
+                        <Grid x:Name="VoiceFixerMixControls" IsEnabled="{Binding EnableVoiceFixerDereverb}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <Slider Minimum="0" Maximum="1" TickFrequency="0.05"
+                                    SmallChange="0.05" IsSnapToTickEnabled="True"
+                                    Value="{Binding VoiceFixerMix, Mode=TwoWay}" />
+                            <TextBox Grid.Column="1" Margin="8,0,0,0" HorizontalContentAlignment="Right"
+                                     IsReadOnly="True" Text="{Binding VoiceFixerMix, Mode=OneWay, StringFormat=P0}" />
+                        </Grid>
+                        <TextBlock Style="{StaticResource MetaTextStyle}"
+                                   Text="{Binding VoiceFixerStatusText}" />
+                        <TextBlock Style="{StaticResource MetaTextStyle}"
+                                   Text="{Binding VoiceFixerPathText}"
+                                   TextWrapping="Wrap" />
+                        <WrapPanel Margin="0,8,0,0">
+                            <Button Click="ChooseVoiceFixer_Click" Content="指定 VoiceFixer" />
+                            <Button Margin="8,0,0,0"
+                                    Click="ClearVoiceFixer_Click"
                                     Content="清除" />
                         </WrapPanel>
 
@@ -548,6 +632,7 @@
                                 <ColumnDefinition Width="88" />
                             </Grid.ColumnDefinitions>
                             <Slider VerticalAlignment="Center"
+                                    IsEnabled="{Binding IsStereoBalanceEnabled}"
                                     Minimum="-1"
                                     Maximum="1"
                                     TickFrequency="0.1"
@@ -557,6 +642,7 @@
                                     Value="{Binding StereoBalance, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
                             <TextBox Grid.Column="1"
                                      VerticalAlignment="Center"
+                                     IsEnabled="{Binding IsStereoBalanceEnabled}"
                                      HorizontalContentAlignment="Right"
                                      Margin="8,0,0,0"
                                      Text="{Binding StereoBalance, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.00}" />
@@ -574,8 +660,29 @@
 
                         <CheckBox Margin="0,10,0,0"
                                   VerticalContentAlignment="Center"
-                                  Content="去殘響"
+                                  Content="空間感抑制"
                                   IsChecked="{Binding ReduceReverb, Mode=TwoWay}" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="空間感抑制強度" />
+                        <Grid IsEnabled="{Binding IsReverbReductionEnabled}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="88" />
+                            </Grid.ColumnDefinitions>
+                            <Slider VerticalAlignment="Center"
+                                    Minimum="0.2"
+                                    Maximum="1"
+                                    TickFrequency="0.1"
+                                    SmallChange="0.1"
+                                    LargeChange="0.2"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding ReverbReductionAmount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <TextBox Grid.Column="1"
+                                     VerticalAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="8,0,0,0"
+                                     Text="{Binding ReverbReductionAmount, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=0.00}" />
+                        </Grid>
 
                         <CheckBox Margin="0,10,0,0"
                                   VerticalContentAlignment="Center"
@@ -616,7 +723,7 @@
                         </ScrollViewer>
                     </TabItem>
 
-                    <TabItem Header="統整">
+                    <TabItem Header="剪輯統整" IsEnabled="{Binding CanStartWork}">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="0,14,12,0">
                                 <TextBlock FontSize="18"
@@ -733,7 +840,7 @@
                         </ScrollViewer>
                     </TabItem>
 
-                    <TabItem Header="工具 / 播放">
+                    <TabItem Header="播放分析">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="0,14,12,0">
                                 <TextBlock FontSize="18"
@@ -779,8 +886,9 @@
 
                                 <TextBlock Style="{StaticResource SectionTitleStyle}" Text="品質分析" />
                                 <WrapPanel Margin="0,0,0,8">
-                                    <Button Click="AnalyzeOriginal_Click" Content="分析原始" />
-                                    <Button Click="AnalyzeProcessed_Click" Content="分析處理後" />
+                                    <Button Click="AnalyzeOriginal_Click" Content="分析原始" IsEnabled="{Binding CanStartWork}" />
+                                    <Button Click="AnalyzeProcessed_Click" Content="分析處理後" IsEnabled="{Binding CanStartWork}" />
+                                    <Button Click="CancelAnalysis_Click" Content="取消分析" IsEnabled="{Binding IsAnalyzing}" />
                                 </WrapPanel>
                                 <TextBox MinHeight="124"
                                          IsReadOnly="True"
@@ -788,17 +896,18 @@
                                          AcceptsReturn="True"
                                          VerticalScrollBarVisibility="Auto"
                                          Text="{Binding AnalysisText}" />
+                                <TextBlock Text="{Binding ProcessingWarningsText}" TextWrapping="Wrap"
+                                           Margin="0,12,0,0" Foreground="{StaticResource MutedTextBrush}" />
 
-                                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="工具與位置" />
+                                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="工具設定" />
                                 <WrapPanel Margin="0,0,0,8">
-                                    <Button Click="ChooseOutputFolder_Click" Content="輸出位置" />
+                                    <Button Click="ChooseOutputFolder_Click" Content="輸出位置" IsEnabled="{Binding CanStartWork}" />
                                     <Button Click="OpenOutputFolder_Click" Content="開啟輸出" />
                                     <Button Click="OpenSelectedFolder_Click" Content="開原檔位置" />
                                     <Button Click="OpenProcessedFile_Click" Content="開處理後檔" />
                                 </WrapPanel>
                                 <WrapPanel Margin="0,0,0,8">
-                                    <Button Click="ChooseAiAudioFolder_Click" Content="AI 音檔資料夾" />
-                                    <Button Click="ChooseFfmpeg_Click" Content="指定 FFmpeg" />
+                                    <Button Click="ChooseFfmpeg_Click" Content="指定 FFmpeg" IsEnabled="{Binding CanStartWork}" />
                                 </WrapPanel>
 
                         <TextBlock Style="{StaticResource MetaTextStyle}"
@@ -806,9 +915,6 @@
                                    TextWrapping="Wrap" />
                         <TextBlock Style="{StaticResource MetaTextStyle}"
                                    Text="{Binding OutputFolderText}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Style="{StaticResource MetaTextStyle}"
-                                   Text="{Binding AiAudioFolderText}"
                                    TextWrapping="Wrap" />
                             </StackPanel>
                         </ScrollViewer>

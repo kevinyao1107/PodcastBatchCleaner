@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <Compile Remove="PodcastBatchCleaner.CrossPlatform\**\*.cs" />
+    <Compile Remove="Tests\**\*.cs" />
     <None Remove="PodcastBatchCleaner.CrossPlatform\**\*" />
     <Page Remove="PodcastBatchCleaner.CrossPlatform\**\*.axaml" />
   </ItemGroup>

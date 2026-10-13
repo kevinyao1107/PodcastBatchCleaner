@@ -5,7 +5,7 @@ namespace PodcastBatchCleaner.Core.Services;
 
 public sealed class DeepFilterNetAudioProcessor
 {
-    public static string? TryFindDeepFilterNet()
+    public static string? TryFindDeepFilterNet(string? baseDirectory = null)
     {
         var fromPath = FindInPath("deep-filter.exe");
         if (fromPath is not null)
@@ -13,15 +13,7 @@ public sealed class DeepFilterNetAudioProcessor
             return fromPath;
         }
 
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, "deep-filter.exe"),
-            Path.Combine(AppContext.BaseDirectory, "tools", "DeepFilterNet", "deep-filter.exe"),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "tools", "DeepFilterNet", "deep-filter.exe")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "tools", "DeepFilterNet", "deep-filter.exe"))
-        };
-
-        return candidates.FirstOrDefault(File.Exists);
+        return BundledAudioToolLocator.Find("DeepFilterNet", ["deep-filter.exe"], baseDirectory);
     }
 
     public async Task<string> ProcessAsync(
@@ -29,7 +21,8 @@ public sealed class DeepFilterNetAudioProcessor
         string inputWavPath,
         string outputFolder,
         bool enablePostFilter,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        double attenuationLimitDb = 20)
     {
         Directory.CreateDirectory(outputFolder);
 
@@ -41,6 +34,11 @@ public sealed class DeepFilterNetAudioProcessor
             RedirectStandardOutput = true,
             CreateNoWindow = true
         };
+
+        startInfo.ArgumentList.Add("-D");
+        startInfo.ArgumentList.Add("-a");
+        startInfo.ArgumentList.Add(Math.Clamp(attenuationLimitDb, 0, 100)
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
 
         if (enablePostFilter)
         {
@@ -56,8 +54,8 @@ public sealed class DeepFilterNetAudioProcessor
 
         TrySetBackgroundPriority(process);
 
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
 
         try
         {
@@ -66,6 +64,8 @@ public sealed class DeepFilterNetAudioProcessor
         catch (OperationCanceledException)
         {
             KillProcessTree(process);
+            await process.WaitForExitAsync().ConfigureAwait(false);
+            await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
             throw;
         }
 

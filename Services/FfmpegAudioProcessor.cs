@@ -11,17 +11,25 @@ public sealed record AudioProcessingOptions(
     bool EnableDenoise,
     bool ReduceRoomTone,
     bool ReduceReverb,
+    double ReverbReductionAmount,
     bool EnhanceVoiceEq,
     bool NormalizeLoudness,
     bool EnableLimiter,
     double VolumeGainDb,
     AudioChannelMode ChannelMode,
     double StereoBalance,
-    string OutputFolder);
+    string OutputFolder,
+    double DenoiseReductionDb = 12,
+    bool RemoveSilence = true);
 
 public sealed record AudioProcessingProgress(
     double Percent,
-    TimeSpan? Position);
+    TimeSpan? Position,
+    string? Stage = null);
+
+public sealed record AudioAnalysisProgress(
+    double Percent,
+    string Stage);
 
 public sealed record AudioMetadataOptions(
     string? Title,
@@ -47,6 +55,9 @@ public sealed record AudioQualityAnalysis(
 
 public sealed class FfmpegAudioProcessor
 {
+    public const int DefaultOutputSampleRate = 48000;
+    public const double OutputTruePeakCeilingDb = -1.5;
+    private const string LossyLimiter = "alimiter=limit=0.7079458:attack=5:release=50:level=false:latency=true";
     private static readonly string[] SupportedExtensions =
     [
         ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".wma", ".mp4"
@@ -75,6 +86,8 @@ public sealed class FfmpegAudioProcessor
 
     public static IReadOnlyCollection<string> AudioExtensions => SupportedExtensions;
 
+    public static double DefaultReverbReductionAmount => 0.6;
+
     public async Task ProcessAsync(
         string ffmpegPath,
         string inputPath,
@@ -92,7 +105,7 @@ public sealed class FfmpegAudioProcessor
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
         var trimDuration = CalculateTrimDuration(trimStart, trimEnd);
 
-        var filters = BuildFilters(options);
+        var filters = BuildFilters(options, IsLossyOutput(audioCodec, outputPath));
         var startInfo = new ProcessStartInfo
         {
             FileName = ffmpegPath,
@@ -129,11 +142,8 @@ public sealed class FfmpegAudioProcessor
             startInfo.ArgumentList.Add(filters);
         }
 
-        if (sampleRate is not null)
-        {
-            startInfo.ArgumentList.Add("-ar");
-            startInfo.ArgumentList.Add(sampleRate.Value.ToString(CultureInfo.InvariantCulture));
-        }
+        startInfo.ArgumentList.Add("-ar");
+        startInfo.ArgumentList.Add((sampleRate ?? DefaultOutputSampleRate).ToString(CultureInfo.InvariantCulture));
 
         var outputChannels = ResolveOutputChannels(options.ChannelMode, channels);
         if (outputChannels is not null)
@@ -152,35 +162,19 @@ public sealed class FfmpegAudioProcessor
         startInfo.ArgumentList.Add("pipe:1");
         startInfo.ArgumentList.Add(outputPath);
 
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("無法啟動 FFmpeg。");
-
-        SetBackgroundPriority(process);
-
-        var errorTask = ReadOutputAsync(process.StandardError, cancellationToken);
-        var outputTask = ReadProgressAsync(process.StandardOutput, trimDuration ?? duration, progress, cancellationToken);
-
-        try
-        {
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            await Task.WhenAll(errorTask, outputTask).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            KillProcessTree(process);
-            throw;
-        }
-
-        if (process.ExitCode != 0)
-        {
-            throw new InvalidOperationException($"FFmpeg 處理失敗，ExitCode={process.ExitCode}");
-        }
+        await RunFfmpegAsync(ffmpegPath, startInfo.ArgumentList.ToArray(),
+            trimDuration ?? duration, progress, cancellationToken,
+            verifyTruePeak: options.EnableLimiter || options.NormalizeLoudness).ConfigureAwait(false);
     }
 
     private static TimeSpan? CalculateTrimDuration(TimeSpan? trimStart, TimeSpan? trimEnd)
     {
-        var start = trimStart is { TotalSeconds: > 0 } ? trimStart.Value : TimeSpan.Zero;
-        if (trimEnd is not { TotalSeconds: > 0 } || trimEnd.Value <= start)
+        var start = trimStart ?? TimeSpan.Zero;
+        if (start < TimeSpan.Zero || (trimEnd is not null && trimEnd <= start))
+        {
+            throw new ArgumentException("剪輯結束時間必須大於開始時間，且時間不能小於 0。");
+        }
+        if (trimEnd is null)
         {
             return null;
         }
@@ -202,6 +196,13 @@ public sealed class FfmpegAudioProcessor
 
         fadeInSeconds = Math.Clamp(fadeInSeconds, 0, 10);
         fadeOutSeconds = Math.Clamp(fadeOutSeconds, 0, 10);
+
+        if (fadeOutSeconds > 0 && duration is null)
+        {
+            duration = await ProbeDurationAsync(ffmpegPath, inputPath, cancellationToken).ConfigureAwait(false);
+            if (duration is null)
+                throw new InvalidOperationException("無法判定片尾音檔長度，不能套用淡出。請轉成 WAV 後重試。");
+        }
 
         var filters = new List<string>();
 
@@ -260,7 +261,8 @@ public sealed class FfmpegAudioProcessor
         IProgress<AudioProcessingProgress>? progress = null,
         CancellationToken cancellationToken = default,
         TimeSpan? trimStart = null,
-        TimeSpan? trimEnd = null)
+        TimeSpan? trimEnd = null,
+        AudioChannelMode? inputChannelMode = null)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
         var trimDuration = CalculateTrimDuration(trimStart, trimEnd);
@@ -290,10 +292,72 @@ public sealed class FfmpegAudioProcessor
             arguments.Add(trimDuration.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
         }
 
+        AddAiChannelSelection(arguments, inputChannelMode);
         arguments.AddRange(
         [
             "-ar",
             "48000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            "-progress",
+            "pipe:1",
+            outputPath
+        ]);
+
+        await RunFfmpegAsync(
+            ffmpegPath,
+            arguments,
+            trimDuration ?? duration,
+            progress,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task PrepareVoiceFixerInputAsync(
+        string ffmpegPath,
+        string inputPath,
+        string outputPath,
+        TimeSpan? duration = null,
+        IProgress<AudioProcessingProgress>? progress = null,
+        CancellationToken cancellationToken = default,
+        TimeSpan? trimStart = null,
+        TimeSpan? trimEnd = null,
+        AudioChannelMode? inputChannelMode = null)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        var trimDuration = CalculateTrimDuration(trimStart, trimEnd);
+
+        var arguments = new List<string>
+        {
+            "-hide_banner",
+            "-nostdin",
+            "-nostats",
+            "-y",
+            "-threads",
+            GetWorkerThreadCount().ToString(CultureInfo.InvariantCulture)
+        };
+
+        if (trimStart is { TotalSeconds: > 0 })
+        {
+            arguments.Add("-ss");
+            arguments.Add(trimStart.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+        }
+
+        arguments.Add("-i");
+        arguments.Add(inputPath);
+
+        if (trimDuration is { TotalSeconds: > 0 })
+        {
+            arguments.Add("-t");
+            arguments.Add(trimDuration.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+        }
+
+        AddAiChannelSelection(arguments, inputChannelMode);
+        arguments.AddRange(
+        [
+            "-ar",
+            "44100",
             "-ac",
             "1",
             "-c:a",
@@ -319,7 +383,10 @@ public sealed class FfmpegAudioProcessor
         IProgress<AudioProcessingProgress>? progress = null,
         CancellationToken cancellationToken = default,
         AudioMetadataOptions? metadata = null,
-        AudioOutputFormat? outputFormat = null)
+        AudioOutputFormat? outputFormat = null,
+        bool normalizeLoudness = false,
+        bool enableLimiter = false,
+        int sampleRate = DefaultOutputSampleRate)
     {
         if (segmentPaths.Count == 0)
         {
@@ -362,17 +429,132 @@ public sealed class FfmpegAudioProcessor
                 concatInputs.Select(path => $"file '{EscapeConcatPath(path)}'"),
                 cancellationToken).ConfigureAwait(false);
 
+            var finalFilters = new List<string>();
+            if (normalizeLoudness)
+            {
+                finalFilters.Add(await BuildMatchedLoudnessFilterAsync(ffmpegPath,
+                    ["-f", "concat", "-safe", "0", "-i", concatListPath], cancellationToken).ConfigureAwait(false));
+            }
+            if (enableLimiter)
+                finalFilters.Add(IsLossyOutput(outputFormat?.AudioCodec, outputPath)
+                    ? LossyLimiter : "alimiter=limit=0.84:attack=5:release=50:level=false:latency=true");
+
             await RunFfmpegAsync(
                 ffmpegPath,
-                BuildMergeArguments(concatListPath, outputPath, metadata, outputFormat),
+                BuildMergeArguments(concatListPath, outputPath, metadata, outputFormat, string.Join(",", finalFilters), sampleRate),
                 totalDuration,
                 progress,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken, verifyTruePeak: normalizeLoudness || enableLimiter).ConfigureAwait(false);
         }
         finally
         {
             TryDeleteDirectory(tempDirectory);
         }
+    }
+
+    private static void AddAiChannelSelection(List<string> arguments, AudioChannelMode? mode)
+    {
+        if (mode?.Value is "left_only" or "right_only")
+        {
+            var channel = mode.Value == "left_only" ? "c0" : "c1";
+            arguments.Add("-af");
+            arguments.Add($"aformat=channel_layouts=stereo,pan=mono|c0={channel}");
+        }
+    }
+
+    public async Task<int> ProbeAudioChannelsAsync(string ffmpegPath, string inputPath,
+        CancellationToken cancellationToken = default)
+    {
+        var ffprobePath = FindSiblingFfprobe(ffmpegPath);
+        if (ffprobePath is null)
+        {
+            var info = await RunAnalysisAsync(ffmpegPath,
+                ["-hide_banner", "-nostdin", "-i", inputPath, "-map", "0:a:0",
+                    "-af", "ashowinfo", "-frames:a", "1", "-f", "null", "-"],
+                cancellationToken).ConfigureAwait(false);
+            var match = Regex.Match(info, @"\bchannels:(?<channels>\d+)");
+            return match.Success && int.TryParse(match.Groups["channels"].Value, out var count)
+                ? count : throw new InvalidOperationException("無法讀取音檔聲道數。");
+        }
+        var output = await RunAnalysisAsync(ffprobePath,
+            ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+                "-of", "default=noprint_wrappers=1:nokey=1", inputPath],
+            cancellationToken).ConfigureAwait(false);
+        return int.TryParse(output.Trim(), out var channels) && channels > 0
+            ? channels : throw new InvalidOperationException("無法讀取音檔聲道數。");
+    }
+
+    public async Task RestoreStereoAsync(string ffmpegPath, string leftPath, string rightPath,
+        string outputPath, CancellationToken cancellationToken = default)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        await RunFfmpegAsync(ffmpegPath,
+            ["-hide_banner", "-nostdin", "-nostats", "-y", "-i", leftPath, "-i", rightPath,
+                "-filter_complex", "[0:a]pan=stereo|c0=c0|c1=0*c0[l];[1:a]pan=stereo|c0=0*c0|c1=c0[r];"
+                    + "[l][r]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[a]",
+                "-map", "[a]", "-c:a", "pcm_s16le", "-progress", "pipe:1", outputPath],
+            null, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task PrepareAlignmentProbeAsync(string ffmpegPath, string inputPath, string outputPath,
+        double startSeconds, CancellationToken cancellationToken)
+    {
+        return RunFfmpegAsync(ffmpegPath,
+            ["-hide_banner", "-nostdin", "-nostats", "-y", "-ss", startSeconds.ToString(CultureInfo.InvariantCulture),
+                "-i", inputPath, "-t", "12", "-ar", "8000", "-ac", "1", "-c:a", "pcm_s16le", outputPath],
+            null, null, cancellationToken);
+    }
+
+    public Task MixAlignedAudioAsync(string ffmpegPath, string originalPath, string restoredPath,
+        string outputPath, double restoredMix, double delaySeconds, double gainDb,
+        double durationSeconds, CancellationToken cancellationToken)
+    {
+        var mix = Math.Clamp(restoredMix, 0, 1);
+        var alignment = delaySeconds >= 0
+            ? string.Create(CultureInfo.InvariantCulture, $"atrim=start={delaySeconds:0.######},asetpts=PTS-STARTPTS")
+            : string.Create(CultureInfo.InvariantCulture, $"adelay={-delaySeconds * 1000:0.###}:all=1");
+        var filter = string.Create(CultureInfo.InvariantCulture,
+            $"[1:a]{alignment},volume={gainDb:0.###}dB[wet];[0:a][wet]amix=inputs=2:weights='{1 - mix:0.###} {mix:0.###}':normalize=0:duration=first,alimiter=limit=0.98:level=false:latency=true[a]");
+        return RunFfmpegAsync(ffmpegPath,
+            ["-hide_banner", "-nostdin", "-nostats", "-y", "-i", originalPath, "-i", restoredPath,
+                "-filter_complex", filter, "-map", "[a]", "-t", durationSeconds.ToString(CultureInfo.InvariantCulture),
+                "-c:a", "pcm_s16le", outputPath],
+            null, null, cancellationToken);
+    }
+
+    public async Task MatchComparisonLoudnessAsync(string ffmpegPath, string inputPath,
+        string outputPath, string audioCodec, CancellationToken cancellationToken,
+        IProgress<AudioProcessingProgress>? progress = null)
+    {
+        var filter = await BuildMatchedLoudnessFilterAsync(ffmpegPath, ["-i", inputPath], cancellationToken)
+            .ConfigureAwait(false);
+        if (IsLossyOutput(audioCodec, outputPath)) filter += "," + LossyLimiter;
+        await RunFfmpegAsync(ffmpegPath,
+            ["-hide_banner", "-nostdin", "-nostats", "-y", "-i", inputPath, "-af", filter,
+                "-ar", "48000", "-c:a", audioCodec, outputPath],
+            null, progress, cancellationToken, verifyTruePeak: true).ConfigureAwait(false);
+    }
+
+    private async Task<string> BuildMatchedLoudnessFilterAsync(string ffmpegPath,
+        string[] inputArguments, CancellationToken cancellationToken)
+    {
+        var analysis = await RunAnalysisAsync(ffmpegPath,
+            ["-hide_banner", "-nostdin", "-nostats", .. inputArguments, "-map", "0:a:0", "-af",
+                "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"],
+            cancellationToken).ConfigureAwait(false);
+        var start = analysis.LastIndexOf('{');
+        var end = analysis.LastIndexOf('}');
+        if (start < 0 || end <= start) throw new InvalidOperationException("無法讀取音檔響度分析。");
+        using var json = System.Text.Json.JsonDocument.Parse(analysis[start..(end + 1)]);
+        if (json.RootElement.GetProperty("input_i").GetString() == "-inf") return "anull";
+        double Metric(string name)
+        {
+            var value = double.Parse(json.RootElement.GetProperty(name).GetString()!, CultureInfo.InvariantCulture);
+            if (!double.IsFinite(value)) throw new InvalidOperationException("音檔響度分析結果無效，無法匹配響度。");
+            return value;
+        }
+        return string.Create(CultureInfo.InvariantCulture,
+            $"loudnorm=I=-16:TP=-1.5:LRA=11:measured_I={Metric("input_i")}:measured_TP={Metric("input_tp")}:measured_LRA={Metric("input_lra")}:measured_thresh={Metric("input_thresh")}:offset={Metric("target_offset")}:linear=true");
     }
 
     public async Task<TimeSpan?> ProbeDurationAsync(
@@ -383,7 +565,7 @@ public sealed class FfmpegAudioProcessor
         var ffprobePath = FindSiblingFfprobe(ffmpegPath);
         if (ffprobePath is null)
         {
-            return null;
+            return await ProbeDurationWithFfmpegAsync(ffmpegPath, inputPath, cancellationToken).ConfigureAwait(false);
         }
 
         var startInfo = new ProcessStartInfo
@@ -409,26 +591,55 @@ public sealed class FfmpegAudioProcessor
             return null;
         }
 
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await StopProcessAsync(process).ConfigureAwait(false);
+            await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
+            throw;
+        }
         var output = await outputTask.ConfigureAwait(false);
         _ = await errorTask.ConfigureAwait(false);
 
         return process.ExitCode == 0
             && double.TryParse(output.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+            && double.IsFinite(seconds) && seconds >= 0 && seconds < TimeSpan.MaxValue.TotalSeconds
             ? TimeSpan.FromSeconds(seconds)
-            : null;
+            : await ProbeDurationWithFfmpegAsync(ffmpegPath, inputPath, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<TimeSpan?> ProbeDurationWithFfmpegAsync(string ffmpegPath, string inputPath,
+        CancellationToken cancellationToken)
+    {
+        var output = await RunAnalysisAsync(ffmpegPath,
+            ["-hide_banner", "-nostdin", "-nostats", "-i", inputPath, "-map", "0:a:0", "-t", "0", "-f", "null", "-"],
+            cancellationToken).ConfigureAwait(false);
+        var match = Regex.Match(output, @"Duration:\s*(?<hours>\d+):(?<minutes>\d{2}):(?<seconds>\d{2}(?:\.\d+)?)",
+            RegexOptions.CultureInvariant);
+        if (!match.Success) return null;
+        var seconds = double.Parse(match.Groups["hours"].Value, CultureInfo.InvariantCulture) * 3600
+            + double.Parse(match.Groups["minutes"].Value, CultureInfo.InvariantCulture) * 60
+            + double.Parse(match.Groups["seconds"].Value, CultureInfo.InvariantCulture);
+        return double.IsFinite(seconds) && seconds >= 0 && seconds < TimeSpan.MaxValue.TotalSeconds
+            ? TimeSpan.FromSeconds(seconds) : null;
     }
 
     public async Task<AudioQualityAnalysis> AnalyzeQualityAsync(
         string ffmpegPath,
         string inputPath,
         TimeSpan? duration = null,
+        IProgress<AudioAnalysisProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        progress?.Report(new AudioAnalysisProgress(0.05, "讀取音檔長度"));
         duration ??= await ProbeDurationAsync(ffmpegPath, inputPath, cancellationToken).ConfigureAwait(false);
 
+        progress?.Report(new AudioAnalysisProgress(0.15, "分析平均音量與峰值"));
         var volumeOutput = await RunAnalysisAsync(
             ffmpegPath,
             [
@@ -445,6 +656,7 @@ public sealed class FfmpegAudioProcessor
             ],
             cancellationToken).ConfigureAwait(false);
 
+        progress?.Report(new AudioAnalysisProgress(0.55, "分析 LUFS 與 True Peak"));
         var loudnessOutput = await RunAnalysisAsync(
             ffmpegPath,
             [
@@ -461,6 +673,7 @@ public sealed class FfmpegAudioProcessor
             ],
             cancellationToken).ConfigureAwait(false);
 
+        progress?.Report(new AudioAnalysisProgress(1, "分析完成"));
         return new AudioQualityAnalysis(
             duration,
             ParseMetric(volumeOutput, @"mean_volume:\s*(?<value>-?\d+(?:\.\d+)?)\s*dB"),
@@ -514,29 +727,18 @@ public sealed class FfmpegAudioProcessor
             $"{baseName}-ai"
         };
 
-        foreach (var candidateName in candidateNames)
-        {
-            foreach (var extension in SupportedExtensions)
-            {
-                var candidate = Path.Combine(aiAudioFolder, $"{candidateName}{extension}");
-                if (File.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
-        }
-
-        return Directory
+        var matches = Directory
             .EnumerateFiles(aiAudioFolder, "*.*", SearchOption.TopDirectoryOnly)
             .Where(IsSupportedAudioFile)
-            .FirstOrDefault(path =>
-            {
-                var name = Path.GetFileNameWithoutExtension(path);
-                return name.StartsWith(baseName, StringComparison.CurrentCultureIgnoreCase)
-                    && (name.Contains("enhanced", StringComparison.CurrentCultureIgnoreCase)
-                        || name.Contains("clean", StringComparison.CurrentCultureIgnoreCase)
-                        || name.Contains("ai", StringComparison.CurrentCultureIgnoreCase));
-            });
+            .Where(path => candidateNames.Contains(Path.GetFileNameWithoutExtension(path), StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        if (matches.Length > 1)
+        {
+            throw new InvalidOperationException(
+                $"{Path.GetFileName(inputPath)} 對應到多個 AI 音檔，請只保留一個對應檔案："
+                + string.Join("、", matches.Select(Path.GetFileName).OrderBy(name => name, StringComparer.OrdinalIgnoreCase)));
+        }
+        return matches.SingleOrDefault();
     }
 
     public static string MakeMergedOutputPath(
@@ -548,9 +750,23 @@ public sealed class FfmpegAudioProcessor
         return MakeOutputPath(sourcePath, outputFolder, customFileName, outputExtension);
     }
 
-    public static string? TryFindFfmpeg()
+    public static string? TryFindBundledFfmpeg(string? baseDirectory = null)
+        => BundledAudioToolLocator.Find("FFmpeg", [OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg"], baseDirectory);
+
+    public async Task<bool> HasAudioEncoderAsync(string ffmpegPath, string encoder,
+        CancellationToken cancellationToken = default)
     {
-        var fromPath = FindInPath("ffmpeg.exe");
+        var listing = await RunAnalysisAsync(ffmpegPath, ["-hide_banner", "-encoders"], cancellationToken).ConfigureAwait(false);
+        return Regex.IsMatch(listing, @"^\s*A\S*\s+" + Regex.Escape(encoder) + @"\s",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+    }
+
+    public static string? TryFindFfmpeg(string? baseDirectory = null)
+    {
+        var bundled = TryFindBundledFfmpeg(baseDirectory);
+        if (bundled is not null) return bundled;
+        var fileName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
+        var fromPath = FindInPath(fileName);
         if (fromPath is not null)
         {
             return fromPath;
@@ -558,8 +774,8 @@ public sealed class FfmpegAudioProcessor
 
         var candidates = new[]
         {
-            Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe"),
-            Path.Combine(AppContext.BaseDirectory, "tools", "ffmpeg.exe"),
+            Path.Combine(baseDirectory ?? AppContext.BaseDirectory, fileName),
+            Path.Combine(baseDirectory ?? AppContext.BaseDirectory, "tools", fileName),
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "JianyingPro", "Apps"),
@@ -577,7 +793,7 @@ public sealed class FfmpegAudioProcessor
 
             if (Directory.Exists(candidate))
             {
-                var found = Directory.EnumerateFiles(candidate, "ffmpeg.exe", SearchOption.AllDirectories)
+                var found = Directory.EnumerateFiles(candidate, fileName, SearchOption.AllDirectories)
                     .FirstOrDefault();
                 if (found is not null)
                 {
@@ -589,43 +805,42 @@ public sealed class FfmpegAudioProcessor
         return null;
     }
 
-    private static string BuildFilters(AudioProcessingOptions options)
+    private static string BuildFilters(AudioProcessingOptions options, bool lossyOutput = false)
     {
         var silenceSeconds = Math.Clamp(Math.Round(options.SilenceSeconds, 1), 0.1, 1.0);
         var threshold = Math.Clamp(options.SilenceThresholdDb, -80, -5);
         var volumeGainDb = Math.Clamp(Math.Round(options.VolumeGainDb, 1), -24, 24);
 
-        var filters = new List<string>
+        var filters = new List<string>();
+        if (options.RemoveSilence)
         {
-            string.Create(
+            filters.Add(string.Create(
                 CultureInfo.InvariantCulture,
-                $"silenceremove=start_periods=1:start_duration={silenceSeconds:0.0}:start_threshold={threshold:0.#}dB:stop_periods=-1:stop_duration={silenceSeconds:0.0}:stop_threshold={threshold:0.#}dB")
-        };
+                $"silenceremove=start_periods=1:start_duration={silenceSeconds:0.0}:start_threshold={threshold:0.#}dB:stop_periods=-1:stop_duration={silenceSeconds:0.0}:stop_threshold={threshold:0.#}dB"));
+        }
 
         AddChannelFilters(filters, options.ChannelMode, options.StereoBalance);
 
         if (options.EnableDenoise)
         {
-            filters.Add("afftdn=nf=-25");
+            filters.Add(string.Create(CultureInfo.InvariantCulture,
+                $"afftdn=nf=-35:nr={Math.Clamp(options.DenoiseReductionDb, 1, 30):0.#}:tn=1"));
         }
 
         if (options.ReduceRoomTone)
         {
-            filters.Add("highpass=f=100");
-            filters.Add("lowpass=f=9000");
-            filters.Add("equalizer=f=250:t=q:w=1.1:g=-3");
-            filters.Add("equalizer=f=500:t=q:w=1.2:g=-1.5");
+            filters.Add("highpass=f=65");
+            filters.Add("adynamicequalizer=dfrequency=300:tfrequency=300:dqfactor=1:tqfactor=1:threshold=0.06:ratio=1.5:range=2:mode=cutabove:attack=30:release=250");
         }
 
         if (options.ReduceReverb)
         {
-            filters.Add("highpass=f=120");
-            filters.Add("lowpass=f=8500");
-            filters.Add("equalizer=f=180:t=q:w=0.8:g=-1.5");
-            filters.Add("equalizer=f=420:t=q:w=1.0:g=-2.5");
-            filters.Add("equalizer=f=900:t=q:w=1.2:g=-1");
-            filters.Add("afftdn=nf=-28:tn=1");
-            filters.Add("acompressor=threshold=-24dB:ratio=2.8:attack=4:release=65:makeup=1dB");
+            var amount = Math.Clamp(options.ReverbReductionAmount, 0.2, 1.0);
+            filters.Add(string.Create(
+                CultureInfo.InvariantCulture,
+                $"adynamicequalizer=dfrequency=420:tfrequency=420:dqfactor=1:tqfactor=1:threshold=0.04:ratio={1 + amount:0.##}:range={1 + 3 * amount:0.##}:mode=cutabove:attack=25:release=220"));
+            filters.Add(string.Create(CultureInfo.InvariantCulture,
+                $"agate=threshold=0.012:ratio={1 + amount:0.##}:range=0.35:attack=15:release=250:makeup=1"));
         }
 
         if (options.EnhanceVoiceEq)
@@ -641,14 +856,14 @@ public sealed class FfmpegAudioProcessor
             filters.Add("loudnorm=I=-16:TP=-1.5:LRA=11");
         }
 
-        if (options.EnableLimiter)
-        {
-            filters.Add("alimiter=limit=0.84:attack=5:release=50");
-        }
-
         if (Math.Abs(volumeGainDb) >= 0.05)
         {
             filters.Add(string.Create(CultureInfo.InvariantCulture, $"volume={volumeGainDb:0.#}dB"));
+        }
+
+        if (options.EnableLimiter)
+        {
+            filters.Add(lossyOutput ? LossyLimiter : "alimiter=limit=0.84:attack=5:release=50:level=false:latency=true");
         }
 
         return string.Join(",", filters);
@@ -701,10 +916,11 @@ public sealed class FfmpegAudioProcessor
         };
     }
 
-    private static async Task ReadOutputAsync(
+    private static async Task<string> ReadOutputAsync(
         StreamReader reader,
         CancellationToken cancellationToken)
     {
+        var tail = new Queue<string>();
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -713,7 +929,13 @@ public sealed class FfmpegAudioProcessor
             {
                 break;
             }
+            tail.Enqueue(line);
+            if (tail.Count > 30)
+            {
+                tail.Dequeue();
+            }
         }
+        return string.Join(Environment.NewLine, tail);
     }
 
     private static async Task CreateSilenceAsync(
@@ -746,7 +968,9 @@ public sealed class FfmpegAudioProcessor
         string concatListPath,
         string outputPath,
         AudioMetadataOptions? metadata,
-        AudioOutputFormat? outputFormat)
+        AudioOutputFormat? outputFormat,
+        string? finalFilter = null,
+        int sampleRate = DefaultOutputSampleRate)
     {
         outputFormat ??= OutputFormats[0];
         var arguments = new List<string>
@@ -781,6 +1005,13 @@ public sealed class FfmpegAudioProcessor
             arguments.Add("attached_pic");
         }
 
+        if (!string.IsNullOrWhiteSpace(finalFilter))
+        {
+            arguments.Add("-af");
+            arguments.Add(finalFilter);
+        }
+        arguments.Add("-ar");
+        arguments.Add(sampleRate.ToString(CultureInfo.InvariantCulture));
         arguments.Add("-c:a");
         arguments.Add(outputFormat.AudioCodec);
 
@@ -822,6 +1053,87 @@ public sealed class FfmpegAudioProcessor
         IReadOnlyList<string> arguments,
         TimeSpan? duration,
         IProgress<AudioProcessingProgress>? progress,
+        CancellationToken cancellationToken,
+        bool verifyTruePeak = false)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var outputPath = arguments[^1];
+        var temporaryPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outputPath))!,
+            $".processing_{Guid.NewGuid():N}{Path.GetExtension(outputPath)}");
+        try
+        {
+            var attenuationDb = 0d;
+            for (var attempt = 0; ; attempt++)
+            {
+                var renderArguments = arguments.Take(arguments.Count - 1).Append(temporaryPath).ToList();
+                if (attenuationDb < 0)
+                {
+                    var gain = string.Create(CultureInfo.InvariantCulture, $"volume={attenuationDb:0.###}dB");
+                    var filterIndex = renderArguments.IndexOf("-af");
+                    if (filterIndex >= 0) renderArguments[filterIndex + 1] += "," + gain;
+                    else renderArguments.InsertRange(renderArguments.Count - 1, ["-af", gain]);
+                }
+                var start = attempt == 0 ? 0d : 0.8 + attempt * 0.05;
+                var range = attempt == 0 ? 0.8 : 0.04;
+                var renderProgress = verifyTruePeak && progress is not null
+                    ? new ScaledProgress(progress, start, range, attempt == 0 ? null : "修正編碼峰值") : progress;
+                await RunFfmpegToFileAsync(ffmpegPath, renderArguments, duration, renderProgress, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!verifyTruePeak) break;
+                progress?.Report(new AudioProcessingProgress(start + range, null, "驗證輸出真峰值"));
+                var peak = await MeasureTruePeakAsync(ffmpegPath, temporaryPath, cancellationToken).ConfigureAwait(false);
+                // FFmpeg prints tenths of a dB, so leave room for measurement rounding.
+                if (peak <= OutputTruePeakCeilingDb - 0.1) break;
+                if (attempt >= 3)
+                    throw new InvalidOperationException($"輸出真峰值仍超過 {OutputTruePeakCeilingDb} dBTP，已保留舊輸出。測得 {peak} dBTP。");
+                attenuationDb += OutputTruePeakCeilingDb - peak - 0.3;
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporaryPath, outputPath, overwrite: true);
+            if (verifyTruePeak) progress?.Report(new AudioProcessingProgress(1, null, "完成"));
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
+    }
+
+    private static bool IsLossyOutput(string? audioCodec, string path)
+        => audioCodec is "aac" or "libmp3lame" or "libvorbis" or "libopus" or "wmav2"
+            || (string.IsNullOrWhiteSpace(audioCodec)
+                && Path.GetExtension(path).ToLowerInvariant() is ".m4a" or ".mp4" or ".aac" or ".mp3" or ".ogg" or ".wma");
+
+    private static async Task<double> MeasureTruePeakAsync(string ffmpegPath, string inputPath,
+        CancellationToken cancellationToken)
+    {
+        var analysis = await RunAnalysisAsync(ffmpegPath,
+            ["-hide_banner", "-nostdin", "-nostats", "-threads", GetWorkerThreadCount().ToString(CultureInfo.InvariantCulture),
+                "-i", inputPath, "-map", "0:a:0", "-af", "ebur128=peak=true:framelog=verbose", "-f", "null", "-"],
+            cancellationToken).ConfigureAwait(false);
+        var matches = Regex.Matches(analysis, @"Peak:\s*(?<value>-?\d+(?:\.\d+)?|-inf)\s*dBFS", RegexOptions.IgnoreCase);
+        if (matches.Count == 0) throw new InvalidOperationException("無法驗證輸出音檔的真峰值，已保留舊輸出。");
+        var value = matches[^1].Groups["value"].Value;
+        if (value.Equals("-inf", StringComparison.OrdinalIgnoreCase)) return double.NegativeInfinity;
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var peak) || !double.IsFinite(peak))
+            throw new InvalidOperationException("輸出真峰值分析結果無效，已保留舊輸出。");
+        return peak;
+    }
+
+    private sealed class ScaledProgress(IProgress<AudioProcessingProgress> target, double start, double range,
+        string? stage) : IProgress<AudioProcessingProgress>
+    {
+        public void Report(AudioProcessingProgress value)
+            => target.Report(value with { Percent = start + value.Percent * range, Stage = stage ?? value.Stage });
+    }
+
+    private static async Task RunFfmpegToFileAsync(
+        string ffmpegPath,
+        IReadOnlyList<string> arguments,
+        TimeSpan? duration,
+        IProgress<AudioProcessingProgress>? progress,
         CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo
@@ -843,7 +1155,7 @@ public sealed class FfmpegAudioProcessor
 
         SetBackgroundPriority(process);
 
-        var errorTask = ReadOutputAsync(process.StandardError, cancellationToken);
+        var errorTask = ReadOutputAsync(process.StandardError, CancellationToken.None);
         var outputTask = ReadProgressAsync(process.StandardOutput, duration, progress, cancellationToken);
 
         try
@@ -853,13 +1165,15 @@ public sealed class FfmpegAudioProcessor
         }
         catch (OperationCanceledException)
         {
-            KillProcessTree(process);
+            await StopProcessAsync(process).ConfigureAwait(false);
+            try { await Task.WhenAll(errorTask, outputTask).ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
             throw;
         }
 
         if (process.ExitCode != 0)
         {
-            throw new InvalidOperationException($"FFmpeg 處理失敗，ExitCode={process.ExitCode}");
+            throw new InvalidOperationException($"FFmpeg 處理失敗，ExitCode={process.ExitCode}。{await errorTask.ConfigureAwait(false)}");
         }
     }
 
@@ -887,8 +1201,8 @@ public sealed class FfmpegAudioProcessor
 
         SetBackgroundPriority(process);
 
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
 
         try
         {
@@ -896,7 +1210,8 @@ public sealed class FfmpegAudioProcessor
         }
         catch (OperationCanceledException)
         {
-            KillProcessTree(process);
+            await StopProcessAsync(process).ConfigureAwait(false);
+            await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
             throw;
         }
 
@@ -906,7 +1221,7 @@ public sealed class FfmpegAudioProcessor
 
         if (process.ExitCode != 0)
         {
-            throw new InvalidOperationException($"FFmpeg 分析失敗，ExitCode={process.ExitCode}");
+            throw new InvalidOperationException($"FFmpeg 分析失敗，ExitCode={process.ExitCode}。{error}");
         }
 
         return combinedOutput;
@@ -1015,6 +1330,15 @@ public sealed class FfmpegAudioProcessor
         catch (InvalidOperationException)
         {
         }
+        catch (System.ComponentModel.Win32Exception)
+        {
+        }
+    }
+
+    private static async Task StopProcessAsync(Process process)
+    {
+        KillProcessTree(process);
+        await process.WaitForExitAsync().ConfigureAwait(false);
     }
 
     private static int GetWorkerThreadCount()
@@ -1058,13 +1382,14 @@ public sealed class FfmpegAudioProcessor
     private static string? FindSiblingFfprobe(string ffmpegPath)
     {
         var directory = Path.GetDirectoryName(ffmpegPath);
+        var fileName = OperatingSystem.IsWindows() ? "ffprobe.exe" : "ffprobe";
         if (directory is null)
         {
-            return FindInPath("ffprobe.exe");
+            return FindInPath(fileName);
         }
 
-        var sibling = Path.Combine(directory, "ffprobe.exe");
-        return File.Exists(sibling) ? sibling : FindInPath("ffprobe.exe");
+        var sibling = Path.Combine(directory, fileName);
+        return File.Exists(sibling) ? sibling : FindInPath(fileName);
     }
 
     private static string NormalizeOutputFileName(

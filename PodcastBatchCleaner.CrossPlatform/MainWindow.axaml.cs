@@ -353,6 +353,7 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
             EnableDenoise,
             ReduceRoomTone,
             false,
+            FfmpegAudioProcessor.DefaultReverbReductionAmount,
             EnhanceVoiceEq,
             NormalizeLoudness,
             EnableLimiter,
@@ -511,9 +512,12 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        var duration = _selectedFile.Duration ?? await ProbeDurationAsync(path) ?? TimeSpan.Zero;
-        PositionSlider.Maximum = Math.Max(1, duration.TotalSeconds);
-        PlaybackDurationText = FormatTime(duration);
+        var duration = string.Equals(path, _selectedFile.FilePath, StringComparison.Ordinal)
+            ? _selectedFile.Duration : null;
+        duration ??= await ProbeDurationAsync(path);
+        duration ??= TimeSpan.Zero;
+        PositionSlider.Maximum = Math.Max(1, duration.Value.TotalSeconds);
+        PlaybackDurationText = FormatTime(duration.Value);
 
         await _player.PlayAsync(_ffplayPath, path, startAt);
         _playbackTimer.Start();
@@ -564,7 +568,10 @@ public sealed partial class MainWindow : Window, INotifyPropertyChanged
 
     private static string? FindTool(string baseName)
     {
+        if (baseName == "ffmpeg") return FfmpegAudioProcessor.TryFindFfmpeg();
         var executableName = OperatingSystem.IsWindows() ? $"{baseName}.exe" : baseName;
+        var bundled = BundledAudioToolLocator.Find("FFmpeg", [executableName], null);
+        if (bundled is not null) return bundled;
         var fromPath = FindInPath(executableName);
         if (fromPath is not null)
         {
