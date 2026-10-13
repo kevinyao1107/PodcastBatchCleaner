@@ -1,4 +1,4 @@
-﻿# 音檔批次調整工具
+# 音檔批次調整工具
 
 這是一個以 .NET 8 製作的音檔批次處理工具，主要用來批次移除靜音片段、降噪、減少空間音，並可在處理前後播放比對音檔。
 
@@ -22,6 +22,9 @@
 - 減少空間音，降低房間感與低中頻箱音
 - 空間感抑制，以 EQ、降噪與壓縮改善空曠感，並可調整處理強度
 - 人聲增厚 EQ，補足偏薄的人聲並讓聲音更靠前
+- 獨立三頻 EQ，可調整低、中、高頻增益
+- 齒音抑制，可調整高頻削減強度（頻帶 EQ，非動態 De-esser）
+- 自訂預設的命名、保存、套用、刪除，以及共用 JSON 預設匯入匯出
 - 聲道處理，可保持原聲道、置中、轉 Mono、指定左/右聲道或調整左右平衡
 - Podcast 響度標準化，讓分段錄音音量更一致
 - 防爆音 Limiter，降低突然大聲造成的爆音風險
@@ -44,6 +47,7 @@
 - 右側以頁籤分類快速處理、AI / 修復、剪輯統整、播放分析功能
 - 可分析音檔品質，查看長度、平均音量、Peak、LUFS 與 True Peak，分析中可取消
 - 可為每個音檔設定剪輯開始與結束時間
+- WPF 可讀取原音波形、點擊定位，並以游標設定剪輯起點與終點
 - 可將多段錄音依清單順序統整成單一音檔
 - 可用上移、下移或拖曳調整統整輸出順序
 - 可設定段落間空白秒數與統整輸出檔名
@@ -77,6 +81,7 @@ Avalonia 跨平台版本會依平台尋找 `ffmpeg` / `ffmpeg.exe`，播放功�
 
 Windows 可下載 FFmpeg 後，將 `ffmpeg.exe` 放到：
 
+- 專案根目錄的 `tools/FFmpeg/`（建議，同時放入 `ffprobe.exe` 與 `ffplay.exe`）
 - 系統 PATH
 - 程式輸出資料夾
 - 程式輸出資料夾下的 `tools/`
@@ -115,6 +120,34 @@ dotnet run --project ./PodcastBatchCleaner.CrossPlatform/PodcastBatchCleaner.Cro
 
 ## 編譯
 
+完整方案：
+
+```powershell
+dotnet build .\PodcastBatchCleaner.sln -c Release
+```
+
+只編譯 Windows WPF 版本：
+
+```powershell
+dotnet build .\PodcastBatchCleanerWpf.csproj -c Release
+```
+
+完成後，Windows 執行檔位於專案根目錄下：
+
+```text
+bin/Release/net8.0-windows/PodcastBatchCleanerWpf.exe
+```
+
+此為編譯輸出，不是獨立安裝包；執行時保留同資料夾的 DLL、設定等檔案，並安裝 .NET 8 Desktop Runtime。從原始碼編譯則需要 .NET 8 SDK。FFmpeg 與 AI 工具需另行配置，不會因編譯而自動下載。
+
+只編譯 Avalonia 跨平台版本：
+
+```powershell
+dotnet build .\PodcastBatchCleaner.CrossPlatform\PodcastBatchCleaner.CrossPlatform.csproj -c Release
+```
+
+## 測試
+
 Windows 回歸檢查（將 FFmpeg 路徑替換成實際位置）：
 
 ```powershell
@@ -126,6 +159,7 @@ dotnet run --project .\Tests\RegressionChecks.csproj -- "C:\tools\ffmpeg\bin\ffm
 也檢查 A/B 原音與目前設定、實際音源的剪輯時長、FFmpeg 時長備援、片尾淡出、整集響度／限幅、全靜音輸出、M4A 封面與標籤，以及響度分析的取消與既有輸出保護。
 另測編碼後真峰值、預設 48 kHz、驗證階段進度、超標重試上限與驗證失敗／取消的舊檔保護。AAC／MP3 測試會先檢查 FFmpeg 是否包含相應編碼器；缺少時會明確列為 SKIP，不算測試通過。
 WPF UI 檢查會在隔離設定的 STA 執行緒建立視窗但不顯示，驗證控制項繫結、AI 選項連動、0% 修復的模型略過、警告保留與處理階段紀錄，不會讀寫使用者設定。可在 DeepFilterNet 路徑後再加上畫面輸出資料夾，產生 1180 x 760 與 980 x 640 的離屏 UI 檢查圖。
+共用預設與音色設定的檢查包含 JSON 格式／版本驗證、參數範圍與三頻 EQ／齒音設定。
 
 長錄音壓力測試（需至少 30 分鐘的錄音及本機 DeepFilterNet）：
 
@@ -152,24 +186,6 @@ tools/FFmpeg/ffplay.exe
 自動搜尋會優先使用專案內的工具，也能從 `bin/Release/net8.0-windows` 找到專案根目錄的工具。已手動指定且仍有效的 FFmpeg 路徑會保留；WPF 在批次、試聽及 A/B 開始時先檢查所選輸出編碼器。若原工具不支援選定格式，但專案工具支援，會明確記錄警告並改用專案工具，再進行 AI 與音訊處理。
 
 執行檔是本機第三方依賴，不提交 Git。換電腦或重新取得專案後，需要下載工具並放到上述位置；不會修改系統 PATH，也不會改動剪映或其他軟體的 FFmpeg。
-
-完整方案：
-
-```powershell
-dotnet build .\PodcastBatchCleaner.sln
-```
-
-Windows WPF 版本：
-
-```powershell
-dotnet build .\PodcastBatchCleanerWpf.csproj
-```
-
-Avalonia 跨平台版本：
-
-```powershell
-dotnet build .\PodcastBatchCleaner.CrossPlatform\PodcastBatchCleaner.CrossPlatform.csproj
-```
 
 ## 使用方式
 
@@ -403,8 +419,23 @@ example_processed_2.m4a
 ```text
 .
 ├── Models/
+│   └── AudioWaveform.cs
+├── Controls/
+│   └── AudioWaveformView.cs
 ├── Services/
-│   └── FfmpegAudioProcessor.cs
+│   ├── FfmpegAudioProcessor.cs
+│   ├── DeepFilterNetAudioProcessor.cs
+│   ├── VoiceFixerAudioProcessor.cs
+│   ├── AudioBlendProcessor.cs
+│   ├── BundledAudioToolLocator.cs
+│   └── PortablePresetFile.cs
+├── Tests/
+│   ├── RegressionChecks.csproj
+│   └── fixtures/
+├── tools/
+│   ├── FFmpeg/
+│   ├── DeepFilterNet/
+│   └── VoiceFixer/
 ├── PodcastBatchCleaner.CrossPlatform/
 ├── App.xaml
 ├── MainWindow.xaml
@@ -422,3 +453,28 @@ example_processed_2.m4a
 - 程式會限制 FFmpeg 執行緒數量並降低 FFmpeg 優先權，避免處理長音檔時 UI 過度卡住。
 - Windows WPF 版本會在關閉程式時保存常用設定到使用者 AppData，下次開啟時會自動還原設定並載入上次資料夾。
 - `processed/`、`bin/`、`obj/`、`.build_*` 等輸出資料夾已在 `.gitignore` 中排除。
+
+## 共用預設
+
+桌面版使用 `audio-studio-presets` JSON 與 SoundLab 交換多組預設。目前匯出 `schemaVersion 2`，匯入相容第一版與第二版。核心欄位包含音量增益（−12～12 dB）、響度開關與 −14／−16／−18／−23 LUFS、靜音剪除開關、門檻（−70～−25 dBFS）、最短空白（0.1～10 秒）、前後保留（0～0.5 秒）及聲道（保留、Mono、左／右 Mono、左右互換）。音量增益在響度正規化之前套用；啟用正規化時，最後響度以目標及峰值保護為準。
+
+預設最多 100 組、檔案上限 1 MB；匯入先檢查版本與全部核心參數。SoundLab 仍接受舊的 `soundlab-presets` JSON。桌面版在「快速處理」提供命名、保存、套用、刪除及 JSON 匯入匯出，並保存到本機設定。
+
+`extensions.soundlab`／`extensions.desktop` 保存各自的非 AI 效果。跨工具套用時，只交換可對應的核心設定，停用無法等效對應的額外效果／AI 並顯示提示；不同 DSP 不承諾相同音色。AI 工具、資料夾路徑、整集資訊與剪輯範圍不包含在共用預設內。桌面版舊的「左右混合置中」、左／右複製成 stereo 與手動平衡模式不屬於這版共用聲道集合，保存共用預設前需切換至支援模式；超出共用增益或門檻範圍也會要求調整，不會暗中改值。
+
+兩邊靜音判定引擎仍不同；相同門檻、秒數與保留時間不保證完全相同的剪接點。A/B 等音量比較固定使用 −16 LUFS，與正式輸出所選的響度目標分開。
+
+### 三頻 EQ 與齒音抑制
+
+第二版在 `core.tone` 包含三頻 EQ 開關、低／中／高頻增益（−12～12 dB）、齒音抑制開關與強度（0～100%），必須提供完整音色設定。人聲增厚／清晰度 EQ、壓縮、降噪、去殘響與 AI 仍是各工具專用效果，不會用相同百分比猜測轉換。
+
+三頻 EQ 使用 140 Hz 低架、1.1 kHz 中頻峰形與 8.5 kHz 高架；齒音抑制與 SoundLab 現有方法一致，使用 7.2 kHz 頻帶 EQ，100% 對應約 −9 dB。這是音色調整，不是動態語音偵測的 De-esser。桌面版新增獨立開關與調整值，套用到單檔、試聽、批次、目前設定 A/B 與整集錄音段落，並保存至本機及共用預設。啟用時使用 48 kHz 處理濾鏡，避免低取樣率來源的高頻濾鏡超過 Nyquist 頻率；最後仍依輸出取樣率設定編碼。
+
+SoundLab 的「人聲 EQ」與「三頻段 EQ」改為獨立開關；舊的本機／JSON 預設匯入時，三頻開關沿用舊 EQ 開關，保留原有效果。
+
+
+## 原音波形與剪輯定位（WPF）
+
+在「播放分析」選取「讀取原音波形」，掃描完整原始音檔；點擊波形定位原音，方向鍵可移動一秒。金線內是剪輯保留範圍，兩側暗色區域會被剪掉；以「游標設為起點／終點」填入該檔案的剪輯時間，也可直接編輯原有時間欄位。無效範圍會顯示原因。
+
+波形使用 48 kHz 解碼串流、最多 1024 個峰值區段及固定讀取緩衝區；各聲道分別取絕對峰值，避免反相立體聲相加後消失。它是定位用的視覺摘要，精確音量及 True Peak 仍請使用品質分析。讀取可取消，切換檔案後不會套用前一檔案的波形。處理後播放不會把不同時間軸的播放位置覆蓋到原音波形；再次點擊波形會切換回原音。Avalonia 介面尚未提供此控制項。
