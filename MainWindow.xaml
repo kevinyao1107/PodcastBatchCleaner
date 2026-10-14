@@ -1,4 +1,4 @@
-﻿<Window x:Class="PodcastBatchCleanerWpf.MainWindow"
+<Window x:Class="PodcastBatchCleanerWpf.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:PodcastBatchCleanerWpf.Controls"
@@ -242,6 +242,8 @@
 
                 <WrapPanel>
                     <Button Click="SelectFolder_Click" Content="選取資料夾" IsEnabled="{Binding CanStartWork}" />
+                    <Button Click="SaveWork_Click" Content="保存工作" IsEnabled="{Binding CanStartWork}" />
+                    <Button Click="LoadWork_Click" Content="恢復工作" IsEnabled="{Binding CanStartWork}" />
                 </WrapPanel>
 
                 <TextBlock Grid.Column="1"
@@ -451,7 +453,7 @@
                     BorderThickness="1"
                     CornerRadius="12"
                     Padding="14">
-                <TabControl>
+                <TabControl x:Name="EditorTabs">
                     <TabItem Header="快速處理" IsEnabled="{Binding CanStartWork}">
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="0,14,12,0">
@@ -885,7 +887,7 @@
                     </TabItem>
 
                     <TabItem Header="播放分析">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer x:Name="PlaybackPanelScroll" VerticalScrollBarVisibility="Auto">
                             <StackPanel Margin="0,14,12,0">
                                 <TextBlock FontSize="18"
                                            FontWeight="SemiBold"
@@ -903,6 +905,7 @@
                                   SelectionChanged="PlaybackSource_SelectionChanged">
                             <ComboBoxItem Content="播放原始音檔" />
                             <ComboBoxItem Content="播放處理後音檔" />
+                            <ComboBoxItem Content="播放上次整集成品" />
                         </ComboBox>
 
                         <StackPanel Orientation="Horizontal">
@@ -938,6 +941,20 @@
                                 <controls:AudioWaveformView x:Name="OriginalWaveform" Height="96" Margin="0,8,0,6"
                                     AutomationProperties.Name="原音波形" AutomationProperties.HelpText="點擊定位原音，方向鍵移動一秒，Home 與 End 移至兩端" />
                                 <TextBlock Text="{Binding WaveformText}" TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBlock x:Name="WorkSessionHeading" Style="{StaticResource SectionTitleStyle}" Text="工作設定" />
+                                <TextBox Text="{Binding WorkSessionText, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" MinHeight="54" MaxHeight="110" VerticalScrollBarVisibility="Auto" />
+                                <Button Click="RelinkWorkAudio_Click" Content="重新指定選取音檔" IsEnabled="{Binding CanStartWork}" />
+                                <TextBlock x:Name="EpisodeReviewHeading" Style="{StaticResource SectionTitleStyle}" Text="整集成品驗收" />
+                                <TextBlock Text="{Binding EpisodePreviewText}" TextWrapping="Wrap" />
+                                <Button Click="PlayEpisode_Click" Content="播放上次整集" IsEnabled="{Binding CanReviewEpisode}" />
+                                <ScrollViewer MaxHeight="160" VerticalScrollBarVisibility="Auto">
+                                    <ItemsControl ItemsSource="{Binding EpisodeChapters}" IsEnabled="{Binding CanReviewEpisode}">
+                                        <ItemsControl.ItemTemplate><DataTemplate>
+                                            <Button Content="{Binding DisplayText}" Tag="{Binding StartSeconds}" Click="EpisodeChapter_Click" HorizontalContentAlignment="Left" />
+                                        </DataTemplate></ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </ScrollViewer>
+                                <TextBlock Text="定位使用剪輯與靜音剪除後的實際長度，並包含段落間隔；工作檔恢復後需重新產生成品。" TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}" />
                                 <TextBlock Style="{StaticResource SectionTitleStyle}" Text="品質分析" />
                                 <WrapPanel Margin="0,0,0,8">
                                     <Button Click="AnalyzeOriginal_Click" Content="分析原始" IsEnabled="{Binding CanStartWork}" />

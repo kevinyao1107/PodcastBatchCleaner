@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using PodcastBatchCleaner.Core.Models;
@@ -79,6 +79,7 @@ static async Task<int> RunChecksAsync(string[] args)
         await AlignmentChecks.RunAsync(ffmpeg, root);
         await ToneChecks.RunAsync(ffmpeg, root);
         await WaveformChecks.RunAsync(ffmpeg, root);
+        await WorkSessionChecks.RunAsync(ffmpeg, root, args.Length > 2 ? args[2] : null);
         RunUiChecks(root, args.Length > 2 ? args[2] : null);
         var parse = typeof(MainWindow).GetMethod("TryParseOptionalTime", BindingFlags.NonPublic | BindingFlags.Static)!;
         foreach (var input in new[] { "NaN", "Infinity", "1e300", "-1", "01:99", "-1:10" })

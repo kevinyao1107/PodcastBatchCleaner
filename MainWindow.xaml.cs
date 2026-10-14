@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -247,6 +247,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (SetField(ref _isAnalyzing, value))
             {
                 OnPropertyChanged(nameof(CanStartWork));
+            OnPropertyChanged(nameof(CanReviewEpisode));
             }
         }
     }
@@ -281,6 +282,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     NotifyProcessingReportChanged();
                 }
                 OnPropertyChanged(nameof(CanStartWork));
+            OnPropertyChanged(nameof(CanReviewEpisode));
             }
         }
     }
@@ -1046,7 +1048,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (!item.HasProcessedFile || item.ProcessedPath is null)
         {
-            StatusText = "這個音檔還沒有處理後版本。";
+            StatusText = PlaybackSourceIndex == 2 ? "尚未有可播放的整集成品。" : "這個音檔還沒有處理後版本。";
             return;
         }
 
@@ -1468,6 +1470,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var tempDirectory = Path.Combine(options.OutputFolder, $".merge_stage_{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDirectory);
         var segmentPaths = new List<string>();
+        var segmentNames = new List<string>();
+        if (PlaybackSourceIndex == 2 || (_lastMergedOutputPath is not null && _player.Source?.LocalPath == _lastMergedOutputPath)) { _playbackTimer.Stop(); _player.Close(); }
         var hasIntro = !string.IsNullOrWhiteSpace(_introAudioPath) && File.Exists(_introAudioPath);
         var hasOutro = !string.IsNullOrWhiteSpace(_outroAudioPath) && File.Exists(_outroAudioPath);
         var totalSteps = items.Count + 1d + (hasIntro ? 1 : 0) + (hasOutro ? 1 : 0);
@@ -1503,7 +1507,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     introProgress,
                     _processingCancellation?.Token ?? CancellationToken.None);
 
-                segmentPaths.Add(introPath);
+                segmentPaths.Add(introPath); segmentNames.Add($"片頭 · {introFileName}");
                 completedSteps++;
                 SetOverallMergeProgress(completedSteps, totalSteps);
             }
@@ -1643,7 +1647,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     trimEnd: trimEnd);
 
                 RecordCompletedProcessingTool("FFmpeg");
-                segmentPaths.Add(segmentPath);
+                segmentPaths.Add(segmentPath); segmentNames.Add(item.FileName);
                 item.Status = "已加入統整";
                 item.IsProcessing = false;
                 completedSteps++;
@@ -1678,7 +1682,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     outroProgress,
                     _processingCancellation?.Token ?? CancellationToken.None);
 
-                segmentPaths.Add(outroPath);
+                segmentPaths.Add(outroPath); segmentNames.Add($"片尾 · {outroFileName}");
                 completedSteps++;
                 SetOverallMergeProgress(completedSteps, totalSteps);
             }
@@ -1703,6 +1707,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 StatusText = $"整集響度分析：{Path.GetFileName(mergedOutputPath)}";
                 progressWindow.SetIndeterminate("整集響度分析", Path.GetFileName(mergedOutputPath));
             }
+            var durations = new List<(string Name, TimeSpan Duration)>();
+            for (var index = 0; index < segmentPaths.Count; index++)
+                durations.Add((segmentNames[index], await _processor.ProbeDurationAsync(ffmpegPath, segmentPaths[index],
+                    _processingCancellation?.Token ?? CancellationToken.None) ?? throw new InvalidDataException("無法判定整集段落長度。")));
+            var chapters = AudioWorkSessionFile.BuildChapters(durations, MergeGapSeconds);
             await _processor.MergeAsync(
                 ffmpegPath,
                 segmentPaths,
@@ -1719,6 +1728,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 normalizeLoudness: options.NormalizeLoudness,
                 enableLimiter: options.EnableLimiter, loudnessTarget: options.LoudnessTarget);
 
+            SetEpisodePreview(mergedOutputPath, chapters);
             foreach (var item in items)
             {
                 item.ProcessedPath = mergedOutputPath;
@@ -2969,7 +2979,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _waveformPosition = 0;
         WaveformText = "選取音檔後，按「讀取原音波形」。暗色區域不會保留。";
         OnPropertyChanged(nameof(SelectedFileText));
-        OpenSelectedForPlayback(autoPlay: false);
+        if (PlaybackSourceIndex != 2) OpenSelectedForPlayback(autoPlay: false);
     }
 
     private async Task AnalyzeAudioAsync(AudioFileItem item, string path, string label)
@@ -3223,6 +3233,150 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { StatusText = ex.Message; }
     }
 
+    private string _workSessionText = "尚未保存工作檔。";
+    public string WorkSessionText { get => _workSessionText; private set => SetField(ref _workSessionText, value); }
+    private string? _lastMergedOutputPath;
+    private double? _pendingEpisodeSeek;
+    public ObservableCollection<EpisodeChapter> EpisodeChapters { get; } = [];
+    public string EpisodePreviewText => _lastMergedOutputPath is null ? "尚未產生整集成品。" : $"上次整集：{Path.GetFileName(_lastMergedOutputPath)}";
+    public bool CanPlayEpisode => _lastMergedOutputPath is not null && File.Exists(_lastMergedOutputPath);
+    public bool CanReviewEpisode => CanPlayEpisode && CanStartWork;
+
+    private void SaveWork_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanStartWork) return;
+        var dialog = new Microsoft.Win32.SaveFileDialog { Filter = "音訊工作檔|*.podcast-work.json", FileName = "episode.podcast-work.json" };
+        if (dialog.ShowDialog(this) != true) return;
+        try { SaveWorkSession(dialog.FileName); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or ArgumentException)
+        { WorkSessionText = $"保存工作檔失敗：{ex.Message}"; StatusText = WorkSessionText; }
+    }
+    private void LoadWork_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanStartWork) return;
+        var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "音訊工作檔|*.podcast-work.json|JSON|*.json" };
+        if (dialog.ShowDialog(this) != true) return;
+        try { LoadWorkSession(dialog.FileName); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or ArgumentException)
+        { WorkSessionText = $"恢復工作檔失敗：{ex.Message}"; StatusText = WorkSessionText; }
+    }
+    private static string? WorkPath(string? path, string folder, bool save) => string.IsNullOrWhiteSpace(path) ? null
+        : save ? Path.GetRelativePath(folder, path) : AudioWorkSessionFile.ResolvePath(path, folder);
+    private static void ConvertWorkPaths(AppSettings settings, string folder, bool save)
+    {
+        settings.CurrentFolder = WorkPath(settings.CurrentFolder, folder, save);
+        settings.OutputFolder = WorkPath(settings.OutputFolder, folder, save);
+        settings.AiAudioFolder = WorkPath(settings.AiAudioFolder, folder, save);
+        settings.IntroAudioPath = WorkPath(settings.IntroAudioPath, folder, save);
+        settings.OutroAudioPath = WorkPath(settings.OutroAudioPath, folder, save);
+        settings.CoverImagePath = WorkPath(settings.CoverImagePath, folder, save);
+    }
+    private void SaveWorkSession(string path)
+    {
+        var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        var settings = CaptureAppSettings();
+        settings.FfmpegPath = settings.DeepFilterNetPath = settings.VoiceFixerPath = null;
+        settings.PortablePresets = null;
+        ConvertWorkPaths(settings, folder, true);
+        var files = AudioFiles.Select(item => new WorkAudioFile(Path.GetRelativePath(folder, item.FilePath),
+            item.CustomOutputFileName, item.TrimStartText, item.TrimEndText)).ToList();
+        AudioWorkSessionFile.Write(path, new AudioWorkSession(AudioWorkSessionFile.Format, 1, JsonSerializer.SerializeToElement(settings), files));
+        WorkSessionText = $"已保存工作檔：{Path.GetFileName(path)}（{files.Count} 個音檔；只保存路徑與設定）";
+        StatusText = $"工作已保存：{Path.GetFileName(path)}";
+    }
+    private void LoadWorkSession(string path)
+    {
+        var work = AudioWorkSessionFile.Read(path);
+        var fields = new HashSet<string>();
+        foreach (var property in work.Settings.EnumerateObject())
+        {
+            var definition = typeof(AppSettings).GetProperty(property.Name);
+            if (definition is null || !fields.Add(property.Name) || (property.Value.ValueKind == JsonValueKind.String && property.Value.GetString()!.Length > 32768) || (property.Value.ValueKind == JsonValueKind.Number &&
+                (!property.Value.TryGetDouble(out var number) || !double.IsFinite(number))))
+                throw new InvalidDataException("工作檔設定欄位不正確。");
+            if (property.Name == nameof(AppSettings.PortablePresets) && property.Value.ValueKind != JsonValueKind.Null)
+                throw new InvalidDataException("工作檔不包含預設資料庫。");
+        }
+        if (new[] { "OutputFormatExtension", "ChannelModeValue", "VolumeGainDb", "LoudnessTarget", "MergeSegments", "MergeGapSeconds", "SilenceSeconds", "SilenceThresholdDb" }.Any(key => !fields.Contains(key)))
+            throw new InvalidDataException("工作檔缺少必要的處理設定。");
+        var settings = work.Settings.Deserialize<AppSettings>() ?? throw new InvalidDataException("工作檔設定不正確。");
+        if (!FfmpegAudioProcessor.OutputFormats.Any(format => format.Extension == settings.OutputFormatExtension) ||
+            !FfmpegAudioProcessor.ChannelModes.Any(mode => mode.Value == settings.ChannelModeValue))
+            throw new InvalidDataException("工作檔輸出格式或聲道模式不支援。");
+        var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        ConvertWorkPaths(settings, folder, false);
+        var restored = work.Files.Select(file => new AudioFileItem
+        {
+            FilePath = AudioWorkSessionFile.ResolvePath(file.FilePath, folder), CustomOutputFileName = file.CustomOutputFileName,
+            TrimStartText = file.TrimStartText, TrimEndText = file.TrimEndText
+        }).ToList();
+        // Keep executable paths on this machine; project files only restore editing choices.
+        settings.FfmpegPath = _ffmpegPath; settings.DeepFilterNetPath = _deepFilterNetPath; settings.VoiceFixerPath = _voiceFixerPath;
+        settings.PortablePresets = null;
+        StopPlayback(); _player.Close(); _waveformCancellation?.Cancel();
+        PlaybackSourceIndex = 0;
+        ApplyAppSettings(settings);
+        _loadedDeepFilterNetPreference = true;
+        _lastMergedOutputPath = null; EpisodeChapters.Clear();
+        OnPropertyChanged(nameof(EpisodePreviewText)); OnPropertyChanged(nameof(CanPlayEpisode)); OnPropertyChanged(nameof(CanReviewEpisode));
+        AudioFiles.Clear();
+        var missing = new List<string>();
+        foreach (var item in restored)
+        {
+            if (!File.Exists(item.FilePath)) { item.Status = "來源不存在"; missing.Add(item.FilePath); }
+            AudioFiles.Add(item);
+        }
+        foreach (var asset in new[] { _introAudioPath, _outroAudioPath, _coverImagePath })
+            if (!string.IsNullOrWhiteSpace(asset) && !File.Exists(asset)) missing.Add(asset);
+        AudioList.SelectedItem = restored.FirstOrDefault(item => File.Exists(item.FilePath));
+        OnPropertyChanged(nameof(FileCountText));
+        WorkSessionText = $"已恢復 {restored.Count} 個音檔。" + (missing.Count == 0 ? "來源均存在。" :
+            $"找不到 {missing.Count} 個來源／附件，請重新指定：{Environment.NewLine}{string.Join(Environment.NewLine, missing.Take(20))}" + (missing.Count > 20 ? $"{Environment.NewLine}其餘 {missing.Count - 20} 項未列出。" : ""));
+        StatusText = $"已恢復工作：{Path.GetFileName(path)}，{restored.Count} 個音檔，{missing.Count} 個缺失來源／附件。";
+        if (_ffmpegPath is not null && File.Exists(_ffmpegPath)) _ = LoadDurationsAsync(restored.Where(item => File.Exists(item.FilePath)).ToList());
+    }
+    private void RelinkWorkAudio_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanStartWork || _selectedFile is null) return;
+        var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "音檔|*.wav;*.mp3;*.m4a;*.flac;*.aac;*.ogg;*.wma|所有檔案|*.*" };
+        if (dialog.ShowDialog(this) != true) return;
+        try { RelinkWorkAudio(dialog.FileName); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        { WorkSessionText = $"重新指定音檔失敗：{ex.Message}"; StatusText = WorkSessionText; }
+    }
+    private void RelinkWorkAudio(string path)
+    {
+        if (_selectedFile is null || !File.Exists(path)) throw new InvalidDataException("找不到替代音檔。");
+        var index = AudioFiles.IndexOf(_selectedFile);
+        var replacement = new AudioFileItem { FilePath = Path.GetFullPath(path), CustomOutputFileName = _selectedFile.CustomOutputFileName,
+            TrimStartText = _selectedFile.TrimStartText, TrimEndText = _selectedFile.TrimEndText };
+        AudioFiles[index] = replacement; AudioList.SelectedItem = replacement;
+        WorkSessionText = $"已重新指定：{replacement.FileName}，剪輯時間與輸出名稱已保留；請重新保存工作檔。";
+    }
+    private void PlayEpisode_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanReviewEpisode) { StatusText = "找不到整集成品，請重新統整輸出。"; return; }
+        PlaybackSourceIndex = 2; OpenSelectedForPlayback(true);
+    }
+    private void EpisodeChapter_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Button { Tag: double seconds }) SeekEpisode(seconds);
+    }
+    private void SeekEpisode(double seconds)
+    {
+        if (!CanReviewEpisode) { StatusText = "找不到整集成品。"; return; }
+        var open = PlaybackSourceIndex != 2 || _player.Source?.LocalPath != _lastMergedOutputPath;
+        if (open) { PlaybackSourceIndex = 2; OpenSelectedForPlayback(false); _pendingEpisodeSeek = seconds; }
+        PositionSlider.Maximum = Math.Max(1, EpisodeChapters.LastOrDefault()?.EndSeconds ?? seconds);
+        PositionSlider.Value = Math.Min(PositionSlider.Maximum, seconds); SeekToSlider();
+    }
+    private void SetEpisodePreview(string path, IReadOnlyList<EpisodeChapter> chapters)
+    {
+        _lastMergedOutputPath = path; EpisodeChapters.Clear();
+        foreach (var chapter in chapters) EpisodeChapters.Add(chapter);
+        OnPropertyChanged(nameof(EpisodePreviewText)); OnPropertyChanged(nameof(CanPlayEpisode)); OnPropertyChanged(nameof(CanReviewEpisode));
+    }
+
     private void LoadSettings()
     {
         try
@@ -3243,6 +3397,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             using var document = JsonDocument.Parse(json);
             _loadedDeepFilterNetPreference = document.RootElement.TryGetProperty(nameof(AppSettings.EnableDeepFilterNet), out _);
 
+            ApplyAppSettings(settings);
+        }
+        catch (InvalidDataException)
+        {
+        }
+        catch (JsonException)
+        {
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private void ApplyAppSettings(AppSettings settings)
+    {
             _currentFolder = settings.CurrentFolder;
             _outputFolder = settings.OutputFolder;
             _aiAudioFolder = settings.AiAudioFolder;
@@ -3312,19 +3484,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             OnPropertyChanged(nameof(DeepFilterNetStatusText));
             OnPropertyChanged(nameof(VoiceFixerPathText));
             OnPropertyChanged(nameof(VoiceFixerStatusText));
-        }
-        catch (InvalidDataException)
-        {
-        }
-        catch (JsonException)
-        {
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
     }
 
     private void SaveSettings()
@@ -3334,7 +3493,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var settingsPath = GetSettingsPath();
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
 
-            var settings = new AppSettings
+            var settings = CaptureAppSettings();
+
+            var json = JsonSerializer.Serialize(settings, SettingsJsonOptions);
+            File.WriteAllText(settingsPath, json);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private AppSettings CaptureAppSettings()
+    {
+        return new AppSettings
             {
                 CurrentFolder = _currentFolder,
                 OutputFolder = _outputFolder,
@@ -3382,16 +3556,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ChannelModeValue = SelectedChannelMode.Value,
                 StereoBalance = StereoBalance
             };
-
-            var json = JsonSerializer.Serialize(settings, SettingsJsonOptions);
-            File.WriteAllText(settingsPath, json);
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
     }
 
     private static string GetSettingsPath()
@@ -3576,7 +3740,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Play_Click(object sender, RoutedEventArgs e)
     {
-        if (_selectedFile is null)
+        if (PlaybackSourceIndex == 2 && !CanReviewEpisode) { StatusText = "整集尚未就緒，或正在處理音檔。"; return; }
+        if (PlaybackSourceIndex == 2 && _player.Source?.LocalPath != _lastMergedOutputPath) { OpenSelectedForPlayback(true); return; }
+        if (_selectedFile is null && PlaybackSourceIndex != 2)
         {
             StatusText = "請先選取音檔。";
             return;
@@ -3637,6 +3803,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             PositionSlider.Value = Math.Min(duration.TotalSeconds, seek);
             SeekToSlider();
         }
+        if (PlaybackSourceIndex == 2 && _pendingEpisodeSeek is { } chapterSeek)
+        {
+            _pendingEpisodeSeek = null; PositionSlider.Value = Math.Min(duration.TotalSeconds, chapterSeek); SeekToSlider();
+        }
         PlaybackDurationText = FormatTime(duration);
 
         if (_selectedFile is not null && _selectedFile.Duration is null && PlaybackSourceIndex == 0)
@@ -3672,12 +3842,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void OpenSelectedForPlayback(bool autoPlay)
     {
-        if (_selectedFile is null)
-        {
-            return;
-        }
-
-        var path = GetPlaybackPath(_selectedFile);
+        if (PlaybackSourceIndex == 2 && !CanStartWork) { StatusText = "處理完成後才能驗收整集。"; return; }
+        if (_selectedFile is null && PlaybackSourceIndex != 2) return;
+        var path = PlaybackSourceIndex == 2 ? (CanPlayEpisode ? _lastMergedOutputPath : null) : GetPlaybackPath(_selectedFile!);
         if (path is null)
         {
             StatusText = "這個音檔還沒有處理後版本。";
@@ -3685,6 +3852,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         _pendingWaveformSeek = null;
+        _pendingEpisodeSeek = null;
         _player.Open(new Uri(path));
         PositionSlider.Value = 0;
         PlaybackPositionText = "00:00";

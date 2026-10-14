@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text;
 using PodcastBatchCleaner.Core.Models;
 using System.Globalization;
@@ -138,14 +138,14 @@ public sealed class FfmpegAudioProcessor
             startInfo.ArgumentList.Add(trimStart.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
         }
 
-        startInfo.ArgumentList.Add("-i");
-        startInfo.ArgumentList.Add(inputPath);
-
+        // Limit the source before time-changing filters such as silenceremove.
         if (trimDuration is { TotalSeconds: > 0 })
         {
             startInfo.ArgumentList.Add("-t");
             startInfo.ArgumentList.Add(trimDuration.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
         }
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add(inputPath);
 
         if (!string.IsNullOrWhiteSpace(filters))
         {
@@ -917,7 +917,7 @@ public sealed class FfmpegAudioProcessor
         {
             filters.Add(string.Create(
                 CultureInfo.InvariantCulture,
-                $"silenceremove=start_periods=1:start_duration={silenceSeconds:0.0}:start_threshold={threshold:0.#}dB:stop_periods=-1:stop_duration={silenceSeconds:0.0}:stop_threshold={threshold:0.#}dB:start_silence={padding:0.##}:stop_silence={padding:0.##}"));
+                $"silenceremove=start_periods=1:start_duration=0:start_threshold={threshold:0.#}dB:stop_periods=-1:stop_duration={silenceSeconds:0.0}:stop_threshold={threshold:0.#}dB:start_silence={padding:0.##}:stop_silence={padding:0.##}"));
         }
 
         AddChannelFilters(filters, options.ChannelMode, options.StereoBalance);

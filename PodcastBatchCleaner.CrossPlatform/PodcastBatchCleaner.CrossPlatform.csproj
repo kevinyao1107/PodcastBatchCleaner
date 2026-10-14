@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Compile Include="..\Models\*.cs" Link="Models\%(Filename)%(Extension)" />
+    <Compile Include="..\Services\AudioWorkSessionFile.cs" Link="Services\AudioWorkSessionFile.cs" />
     <Compile Include="..\Services\FfmpegAudioProcessor.cs" Link="Services\FfmpegAudioProcessor.cs" />
     <Compile Include="..\Services\BundledAudioToolLocator.cs" Link="Services\BundledAudioToolLocator.cs" />
   </ItemGroup>
