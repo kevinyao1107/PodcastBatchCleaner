@@ -1,0 +1,33 @@
+{
+  "format": "audio-studio-presets",
+  "schemaVersion": 2,
+  "presets": [
+    {
+      "name": "跨工具 EQ 測試",
+      "core": {
+        "gainDb": 0,
+        "loudnessEnabled": true,
+        "loudnessTarget": -16,
+        "silenceTrimEnabled": false,
+        "silenceThresholdDb": -45,
+        "minimumSilenceSeconds": 0.5,
+        "silencePaddingSeconds": 0.12,
+        "channelMode": "source",
+        "tone": {
+          "eqEnabled": true,
+          "lowEqDb": 3,
+          "midEqDb": -2,
+          "highEqDb": 1.5,
+          "deEsserEnabled": true,
+          "deEsserAmount": 70
+        }
+      },
+      "extensions": {
+        "desktop": {
+          "EnableDenoise": true,
+          "EnableLimiter": true
+        }
+      }
+    }
+  ]
+}

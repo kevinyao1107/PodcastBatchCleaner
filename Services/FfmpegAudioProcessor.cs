@@ -1,4 +1,6 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
+using System.Text;
+using PodcastBatchCleaner.Core.Models;
 using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
@@ -20,7 +22,12 @@ public sealed record AudioProcessingOptions(
     double StereoBalance,
     string OutputFolder,
     double DenoiseReductionDb = 12,
-    bool RemoveSilence = true);
+    bool RemoveSilence = true,
+    int LoudnessTarget = -16,
+    double SilencePaddingSeconds = 0,
+    bool EnableThreeBandEq = false,
+    double LowEqDb = 0, double MidEqDb = 0, double HighEqDb = 0,
+    bool EnableDeEsser = false, double DeEsserAmount = 45);
 
 public sealed record AudioProcessingProgress(
     double Percent,
@@ -77,7 +84,10 @@ public sealed class FfmpegAudioProcessor
         new("保持原聲道", "keep"),
         new("左聲道為主", "left_only"),
         new("右聲道為主", "right_only"),
-        new("左右平衡調整", "balance")
+        new("左右平衡調整", "balance"),
+        new("左聲道輸出 Mono", "left_mono"),
+        new("右聲道輸出 Mono", "right_mono"),
+        new("左右互換", "swap")
     ];
 
     public static AudioChannelMode DefaultPodcastChannelMode => ChannelModes[0];
@@ -105,6 +115,7 @@ public sealed class FfmpegAudioProcessor
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
         var trimDuration = CalculateTrimDuration(trimStart, trimEnd);
 
+        options = options with { ChannelMode = await ResolveCommonInputChannelAsync(ffmpegPath, inputPath, options.ChannelMode, cancellationToken).ConfigureAwait(false) };
         var filters = BuildFilters(options, IsLossyOutput(audioCodec, outputPath));
         var startInfo = new ProcessStartInfo
         {
@@ -292,6 +303,7 @@ public sealed class FfmpegAudioProcessor
             arguments.Add(trimDuration.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
         }
 
+        if (inputChannelMode is not null) inputChannelMode = await ResolveCommonInputChannelAsync(ffmpegPath, inputPath, inputChannelMode, cancellationToken).ConfigureAwait(false);
         AddAiChannelSelection(arguments, inputChannelMode);
         arguments.AddRange(
         [
@@ -353,6 +365,7 @@ public sealed class FfmpegAudioProcessor
             arguments.Add(trimDuration.Value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture));
         }
 
+        if (inputChannelMode is not null) inputChannelMode = await ResolveCommonInputChannelAsync(ffmpegPath, inputPath, inputChannelMode, cancellationToken).ConfigureAwait(false);
         AddAiChannelSelection(arguments, inputChannelMode);
         arguments.AddRange(
         [
@@ -386,7 +399,8 @@ public sealed class FfmpegAudioProcessor
         AudioOutputFormat? outputFormat = null,
         bool normalizeLoudness = false,
         bool enableLimiter = false,
-        int sampleRate = DefaultOutputSampleRate)
+        int sampleRate = DefaultOutputSampleRate,
+        int loudnessTarget = -16)
     {
         if (segmentPaths.Count == 0)
         {
@@ -433,7 +447,7 @@ public sealed class FfmpegAudioProcessor
             if (normalizeLoudness)
             {
                 finalFilters.Add(await BuildMatchedLoudnessFilterAsync(ffmpegPath,
-                    ["-f", "concat", "-safe", "0", "-i", concatListPath], cancellationToken).ConfigureAwait(false));
+                    ["-f", "concat", "-safe", "0", "-i", concatListPath], cancellationToken, loudnessTarget).ConfigureAwait(false));
             }
             if (enableLimiter)
                 finalFilters.Add(IsLossyOutput(outputFormat?.AudioCodec, outputPath)
@@ -454,12 +468,19 @@ public sealed class FfmpegAudioProcessor
 
     private static void AddAiChannelSelection(List<string> arguments, AudioChannelMode? mode)
     {
-        if (mode?.Value is "left_only" or "right_only")
+        if (mode?.Value is "left_only" or "right_only" or "left_mono" or "right_mono")
         {
-            var channel = mode.Value == "left_only" ? "c0" : "c1";
+            var channel = mode.Value is "left_only" or "left_mono" ? "c0" : "c1";
             arguments.Add("-af");
             arguments.Add($"aformat=channel_layouts=stereo,pan=mono|c0={channel}");
         }
+    }
+
+    private async Task<AudioChannelMode> ResolveCommonInputChannelAsync(string ffmpegPath, string inputPath, AudioChannelMode mode, CancellationToken cancellationToken)
+    {
+        if (mode.Value is not ("mono" or "left_mono" or "right_mono" or "swap")) return mode;
+        var count = await ProbeAudioChannelsAsync(ffmpegPath, inputPath, cancellationToken).ConfigureAwait(false);
+        return count == 1 ? KeepOriginalChannelMode : mode;
     }
 
     public async Task<int> ProbeAudioChannelsAsync(string ffmpegPath, string inputPath,
@@ -536,11 +557,12 @@ public sealed class FfmpegAudioProcessor
     }
 
     private async Task<string> BuildMatchedLoudnessFilterAsync(string ffmpegPath,
-        string[] inputArguments, CancellationToken cancellationToken)
+        string[] inputArguments, CancellationToken cancellationToken, int loudnessTarget = -16)
     {
+        ValidateLoudnessTarget(loudnessTarget);
         var analysis = await RunAnalysisAsync(ffmpegPath,
             ["-hide_banner", "-nostdin", "-nostats", .. inputArguments, "-map", "0:a:0", "-af",
-                "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"],
+                $"loudnorm=I={loudnessTarget}:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"],
             cancellationToken).ConfigureAwait(false);
         var start = analysis.LastIndexOf('{');
         var end = analysis.LastIndexOf('}');
@@ -554,7 +576,7 @@ public sealed class FfmpegAudioProcessor
             return value;
         }
         return string.Create(CultureInfo.InvariantCulture,
-            $"loudnorm=I=-16:TP=-1.5:LRA=11:measured_I={Metric("input_i")}:measured_TP={Metric("input_tp")}:measured_LRA={Metric("input_lra")}:measured_thresh={Metric("input_thresh")}:offset={Metric("target_offset")}:linear=true");
+            $"loudnorm=I={loudnessTarget}:TP=-1.5:LRA=11:measured_I={Metric("input_i")}:measured_TP={Metric("input_tp")}:measured_LRA={Metric("input_lra")}:measured_thresh={Metric("input_thresh")}:offset={Metric("target_offset")}:linear=true");
     }
 
     public async Task<TimeSpan?> ProbeDurationAsync(
@@ -627,6 +649,78 @@ public sealed class FfmpegAudioProcessor
             + double.Parse(match.Groups["seconds"].Value, CultureInfo.InvariantCulture);
         return double.IsFinite(seconds) && seconds >= 0 && seconds < TimeSpan.MaxValue.TotalSeconds
             ? TimeSpan.FromSeconds(seconds) : null;
+    }
+
+    public async Task<AudioWaveform> ReadWaveformAsync(string ffmpegPath, string inputPath,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var channels = await ProbeAudioChannelsAsync(ffmpegPath, inputPath, cancellationToken).ConfigureAwait(false);
+        if (channels is < 1 or > 64) throw new InvalidOperationException("波形不支援此音檔的聲道數。");
+        const int sampleRate = 48000;
+        var info = new ProcessStartInfo
+        {
+            FileName = ffmpegPath, UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        foreach (var arg in new[] { "-hide_banner", "-nostdin", "-v", "error", "-threads", "2", "-i", inputPath,
+            "-map", "0:a:0", "-vn", "-ar", "48000", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1" })
+            info.ArgumentList.Add(arg);
+        using var process = Process.Start(info) ?? throw new InvalidOperationException("無法啟動 FFmpeg。");
+        SetBackgroundPriority(process);
+        // Drain errors concurrently so a corrupt input cannot block the PCM pipe; retain only a short tail.
+        var errorTask = Task.Run(async () =>
+        {
+            var tail = new StringBuilder();
+            var chars = new char[2048];
+            int read;
+            while ((read = await process.StandardError.ReadAsync(chars).ConfigureAwait(false)) > 0)
+            {
+                tail.Append(chars, 0, read);
+                if (tail.Length > 8192) tail.Remove(0, tail.Length - 8192);
+            }
+            return tail.ToString();
+        });
+        try
+        {
+            var builder = new AudioWaveformBuilder();
+            var frameBytes = channels * sizeof(float);
+            var buffer = new byte[frameBytes * 4096];
+            var pending = 0;
+            int count;
+            while ((count = await process.StandardOutput.BaseStream.ReadAsync(buffer.AsMemory(pending), cancellationToken)
+                .ConfigureAwait(false)) > 0)
+            {
+                var total = pending + count;
+                var complete = total - total % frameBytes;
+                for (var offset = 0; offset < complete; offset += frameBytes)
+                {
+                    float peak = 0;
+                    for (var channel = 0; channel < channels; channel++)
+                    {
+                        var value = BitConverter.Int32BitsToSingle(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(
+                            buffer.AsSpan(offset + channel * sizeof(float), sizeof(float))));
+                        if (!float.IsFinite(value)) throw new InvalidDataException("音檔含有無效的 PCM 數值。");
+                        peak = Math.Max(peak, Math.Abs(value));
+                    }
+                    builder.AddFrame(peak);
+                }
+                pending = total - complete;
+                buffer.AsSpan(complete, pending).CopyTo(buffer);
+            }
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var error = await errorTask.ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (process.ExitCode != 0) throw new InvalidOperationException($"波形讀取失敗：{error}");
+            if (pending != 0) throw new InvalidDataException("音訊資料未包含完整的 PCM frame。");
+            return builder.Build(sampleRate);
+        }
+        catch
+        {
+            await StopProcessAsync(process).ConfigureAwait(false);
+            await errorTask.ConfigureAwait(false);
+            throw;
+        }
     }
 
     public async Task<AudioQualityAnalysis> AnalyzeQualityAsync(
@@ -805,9 +899,16 @@ public sealed class FfmpegAudioProcessor
         return null;
     }
 
+    private static void ValidateLoudnessTarget(int target)
+    {
+        if (!new[] { -14, -16, -18, -23 }.Contains(target)) throw new ArgumentOutOfRangeException(nameof(target));
+    }
+
     private static string BuildFilters(AudioProcessingOptions options, bool lossyOutput = false)
     {
-        var silenceSeconds = Math.Clamp(Math.Round(options.SilenceSeconds, 1), 0.1, 1.0);
+        ValidateLoudnessTarget(options.LoudnessTarget);
+        var silenceSeconds = Math.Clamp(Math.Round(options.SilenceSeconds, 1), 0.1, 10.0);
+        var padding = Math.Clamp(options.SilencePaddingSeconds, 0, .5);
         var threshold = Math.Clamp(options.SilenceThresholdDb, -80, -5);
         var volumeGainDb = Math.Clamp(Math.Round(options.VolumeGainDb, 1), -24, 24);
 
@@ -816,7 +917,7 @@ public sealed class FfmpegAudioProcessor
         {
             filters.Add(string.Create(
                 CultureInfo.InvariantCulture,
-                $"silenceremove=start_periods=1:start_duration={silenceSeconds:0.0}:start_threshold={threshold:0.#}dB:stop_periods=-1:stop_duration={silenceSeconds:0.0}:stop_threshold={threshold:0.#}dB"));
+                $"silenceremove=start_periods=1:start_duration={silenceSeconds:0.0}:start_threshold={threshold:0.#}dB:stop_periods=-1:stop_duration={silenceSeconds:0.0}:stop_threshold={threshold:0.#}dB:start_silence={padding:0.##}:stop_silence={padding:0.##}"));
         }
 
         AddChannelFilters(filters, options.ChannelMode, options.StereoBalance);
@@ -851,14 +952,28 @@ public sealed class FfmpegAudioProcessor
             filters.Add("acompressor=threshold=-18dB:ratio=2.2:attack=8:release=120:makeup=1.5dB");
         }
 
-        if (options.NormalizeLoudness)
+        if (options.EnableThreeBandEq || options.EnableDeEsser)
         {
-            filters.Add("loudnorm=I=-16:TP=-1.5:LRA=11");
+            // Use one defined working rate so 8 kHz sources can safely pass the 8.5/7.2 kHz filters.
+            filters.Add("aresample=48000");
+            if (options.EnableThreeBandEq)
+            {
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"bass=f=140:t=q:w=0.707:g={Math.Clamp(options.LowEqDb, -12, 12):0.###}"));
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"equalizer=f=1100:t=q:w=0.8:g={Math.Clamp(options.MidEqDb, -12, 12):0.###}"));
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"treble=f=8500:t=q:w=0.707:g={Math.Clamp(options.HighEqDb, -12, 12):0.###}"));
+            }
+            if (options.EnableDeEsser)
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"equalizer=f=7200:t=q:w=1.8:g={-Math.Clamp(options.DeEsserAmount, 0, 100) * .09:0.###}"));
         }
 
         if (Math.Abs(volumeGainDb) >= 0.05)
         {
             filters.Add(string.Create(CultureInfo.InvariantCulture, $"volume={volumeGainDb:0.#}dB"));
+        }
+
+        if (options.NormalizeLoudness)
+        {
+            filters.Add($"loudnorm=I={options.LoudnessTarget}:TP=-1.5:LRA=11");
         }
 
         if (options.EnableLimiter)
@@ -876,6 +991,15 @@ public sealed class FfmpegAudioProcessor
             case "mono":
                 filters.Add("aformat=channel_layouts=stereo");
                 filters.Add("pan=mono|c0=0.5*c0+0.5*c1");
+                break;
+            case "left_mono":
+                filters.Add("aformat=channel_layouts=stereo,pan=mono|c0=c0");
+                break;
+            case "right_mono":
+                filters.Add("aformat=channel_layouts=stereo,pan=mono|c0=c1");
+                break;
+            case "swap":
+                filters.Add("aformat=channel_layouts=stereo,pan=stereo|c0=c1|c1=c0");
                 break;
             case "center_stereo":
                 filters.Add("aformat=channel_layouts=stereo");
@@ -910,8 +1034,8 @@ public sealed class FfmpegAudioProcessor
 
         return channelMode.Value switch
         {
-            "mono" => 1,
-            "center_stereo" or "left_only" or "right_only" or "balance" => 2,
+            "mono" or "left_mono" or "right_mono" => 1,
+            "center_stereo" or "left_only" or "right_only" or "balance" or "swap" => 2,
             _ => null
         };
     }

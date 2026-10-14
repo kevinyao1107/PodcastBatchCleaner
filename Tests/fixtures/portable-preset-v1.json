@@ -1,0 +1,29 @@
+{
+  "format": "audio-studio-presets",
+  "schemaVersion": 1,
+  "presets": [
+    {
+      "name": "跨工具 Podcast",
+      "core": {
+        "gainDb": 2,
+        "loudnessEnabled": true,
+        "loudnessTarget": -18,
+        "silenceTrimEnabled": true,
+        "silenceThresholdDb": -45,
+        "minimumSilenceSeconds": 2,
+        "silencePaddingSeconds": 0.12,
+        "channelMode": "left"
+      },
+      "extensions": {
+        "soundlab": {
+          "gainDb": 2,
+          "noiseReduction": 55,
+          "roomReduction": 62,
+          "voiceEq": 70,
+          "noiseEnabled": true,
+          "deEsserEnabled": true
+        }
+      }
+    }
+  ]
+}

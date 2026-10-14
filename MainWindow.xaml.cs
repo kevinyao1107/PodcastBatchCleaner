@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -41,6 +41,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string? _outputFolder;
     private string? _aiAudioFolder;
     private string? _ffmpegPath;
+    private string _waveformText = "選取音檔後，按「讀取原音波形」。暗色區域不會保留。";
+    private double _waveformPosition;
+    private CancellationTokenSource? _waveformCancellation;
+    private double? _pendingWaveformSeek;
+    public string WaveformText { get => _waveformText; private set => SetField(ref _waveformText, value); }
     private bool _isDraggingPosition;
     private bool _isProcessing;
     private bool _closeAfterWork;
@@ -49,6 +54,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private int _processingWarningCount;
     private AudioFileItem? _processingReportItem;
     private bool _loadedDeepFilterNetPreference;
+    private int _loudnessTarget = -16;
+    private bool _removeSilence = true;
+    private double _silencePaddingSeconds;
+    private PortablePreset? _selectedPortablePreset;
+    private string _presetName = "我的設定";
     private double _silenceSeconds = 0.1;
     private double _silenceThresholdDb = -35;
     private bool _enableDenoise = true;
@@ -63,6 +73,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _reduceRoomTone;
     private bool _reduceReverb;
     private double _reverbReductionAmount = FfmpegAudioProcessor.DefaultReverbReductionAmount;
+    private bool _enableThreeBandEq;
+    private double _lowEqDb, _midEqDb, _highEqDb;
+    private bool _enableDeEsser;
+    private double _deEsserAmount = 45;
     private bool _enhanceVoiceEq;
     private bool _normalizeLoudness = true;
     private bool _enableLimiter = true;
@@ -100,6 +114,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         InitializeComponent();
         DataContext = this;
+        OriginalWaveform.SeekRequested += SeekOriginalWaveform;
 
         _playbackTimer = new DispatcherTimer
         {
@@ -288,10 +303,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         set => SetField(ref _playbackDurationText, value);
     }
 
+    public bool EnableThreeBandEq { get => _enableThreeBandEq; set => SetField(ref _enableThreeBandEq, value); }
+    public double LowEqDb { get => _lowEqDb; set { if (double.IsFinite(value)) SetField(ref _lowEqDb, Math.Clamp(value, -12, 12)); } }
+    public double MidEqDb { get => _midEqDb; set { if (double.IsFinite(value)) SetField(ref _midEqDb, Math.Clamp(value, -12, 12)); } }
+    public double HighEqDb { get => _highEqDb; set { if (double.IsFinite(value)) SetField(ref _highEqDb, Math.Clamp(value, -12, 12)); } }
+    public bool EnableDeEsser { get => _enableDeEsser; set => SetField(ref _enableDeEsser, value); }
+    public double DeEsserAmount { get => _deEsserAmount; set { if (double.IsFinite(value)) SetField(ref _deEsserAmount, Math.Clamp(value, 0, 100)); } }
+
+    public IReadOnlyList<int> LoudnessTargets { get; } = [-14, -16, -18, -23];
+    public int LoudnessTarget
+    {
+        get => _loudnessTarget;
+        set { if (LoudnessTargets.Contains(value)) SetField(ref _loudnessTarget, value); }
+    }
+    public bool RemoveSilence { get => _removeSilence; set => SetField(ref _removeSilence, value); }
+    public double SilencePaddingSeconds { get => _silencePaddingSeconds; set => SetField(ref _silencePaddingSeconds, Math.Clamp(value, 0, .5)); }
+    public ObservableCollection<PortablePreset> PortablePresets { get; } = [];
+    public PortablePreset? SelectedPortablePreset { get => _selectedPortablePreset; set => SetField(ref _selectedPortablePreset, value); }
+    public string PresetName { get => _presetName; set => SetField(ref _presetName, value); }
+
     public double SilenceSeconds
     {
         get => _silenceSeconds;
-        set => SetField(ref _silenceSeconds, Math.Clamp(Math.Round(value, 1), 0.1, 1.0));
+        set => SetField(ref _silenceSeconds, Math.Clamp(Math.Round(value, 1), 0.1, 10.0));
     }
 
     public double SilenceThresholdDb
@@ -612,6 +646,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ReduceReverb = reduceReverb;
         ReverbReductionAmount = reverbReductionAmount;
         EnhanceVoiceEq = enhanceVoiceEq;
+        EnableThreeBandEq = EnableDeEsser = false;
+        LowEqDb = MidEqDb = HighEqDb = 0;
         NormalizeLoudness = normalizeLoudness;
         EnableLimiter = enableLimiter;
         VolumeGainDb = volumeGainDb;
@@ -1177,7 +1213,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SelectedChannelMode,
             StereoBalance,
             _outputFolder,
-            DenoiseReductionDb);
+            DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount);
 
         var progressWindow = new ProcessingProgressWindow
         {
@@ -1681,7 +1717,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     _coverImagePath),
                 SelectedOutputFormat,
                 normalizeLoudness: options.NormalizeLoudness,
-                enableLimiter: options.EnableLimiter);
+                enableLimiter: options.EnableLimiter, loudnessTarget: options.LoudnessTarget);
 
             foreach (var item in items)
             {
@@ -2121,7 +2157,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 SelectedChannelMode,
                 StereoBalance,
                 previewFolder,
-                DenoiseReductionDb);
+                DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount);
 
             var outputPath = FfmpegAudioProcessor.MakeOutputPath(
                 item.FilePath,
@@ -2533,7 +2569,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Func<AudioChannelMode, double, double, Task<string>> processChannel)
     {
         var mode = SelectedChannelMode;
-        if (mode.Value is not ("keep" or "balance"))
+        if (mode.Value is not ("keep" or "balance" or "swap"))
         {
             return await processChannel(mode, startPercent, endPercent);
         }
@@ -2596,7 +2632,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         => CreateComparisonPresetsForOptions(new AudioProcessingOptions(
             SilenceSeconds, SilenceThresholdDb, EnableDenoise, ReduceRoomTone, ReduceReverb,
             ReverbReductionAmount, EnhanceVoiceEq, NormalizeLoudness, EnableLimiter,
-            VolumeGainDb, SelectedChannelMode, StereoBalance, _outputFolder ?? string.Empty, DenoiseReductionDb));
+            VolumeGainDb, SelectedChannelMode, StereoBalance, _outputFolder ?? string.Empty, DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount));
 
     private static IReadOnlyList<ComparisonPreset> CreateComparisonPresetsForOptions(AudioProcessingOptions currentOptions)
     {
@@ -2925,7 +2961,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void AudioList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        _waveformCancellation?.Cancel();
+        if (_selectedFile is not null) _selectedFile.PropertyChanged -= SelectedWaveformFile_Changed;
         _selectedFile = AudioList.SelectedItem as AudioFileItem;
+        if (_selectedFile is not null) _selectedFile.PropertyChanged += SelectedWaveformFile_Changed;
+        OriginalWaveform.SetWaveform(null);
+        _waveformPosition = 0;
+        WaveformText = "選取音檔後，按「讀取原音波形」。暗色區域不會保留。";
         OnPropertyChanged(nameof(SelectedFileText));
         OpenSelectedForPlayback(autoPlay: false);
     }
@@ -3104,6 +3146,83 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private AudioProcessingOptions AvoidRepeatedDenoise(AudioProcessingOptions options)
         => options with { EnableDenoise = options.EnableDenoise && !_aiDenoiseApplied };
 
+    private PortablePreset CapturePortablePreset()
+    {
+        var channel = SelectedChannelMode.Value switch { "keep" => "source", "mono" => "mono", "left_mono" => "left", "right_mono" => "right", "swap" => "swap", _ => throw new InvalidDataException("共用預設支援保留、Mono、左／右 Mono 或左右互換。請先切換聲道模式；置中與手動平衡無法等效交換。") };
+        var core = new PortableCore(VolumeGainDb, NormalizeLoudness, LoudnessTarget, RemoveSilence, SilenceThresholdDb, SilenceSeconds, SilencePaddingSeconds, channel, new PortableTone(EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount));
+        PortablePresetFile.Validate(core);
+        var native = JsonSerializer.SerializeToElement(new { EnableDenoise, DenoiseStrengthIndex, ReduceRoomTone, ReduceReverb, ReverbReductionAmount, EnhanceVoiceEq, EnableLimiter });
+        return new PortablePreset(PresetName.Trim(), core, new() { ["desktop"] = native });
+    }
+    private void SavePortablePreset_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (PortablePresets.Count >= 100) throw new InvalidDataException("最多保存 100 組預設。");
+            var preset = CapturePortablePreset();
+            PortablePresetFile.Serialize([preset]);
+            PortablePresets.Add(preset); SelectedPortablePreset = preset; SaveSettings();
+            StatusText = "已保存共用預設（不包含 AI 工具、路徑與剪輯範圍）。";
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException) { StatusText = ex.Message; }
+    }
+    private void ApplyPortablePreset_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedPortablePreset is not { } p) return;
+        var c = p.Core;
+        VolumeGainDb = c.GainDb; NormalizeLoudness = c.LoudnessEnabled; LoudnessTarget = c.LoudnessTarget;
+        RemoveSilence = c.SilenceTrimEnabled; SilenceSeconds = c.MinimumSilenceSeconds; SilenceThresholdDb = c.SilenceThresholdDb; SilencePaddingSeconds = c.SilencePaddingSeconds;
+        var mode = c.ChannelMode switch { "source" => "keep", "left" => "left_mono", "right" => "right_mono", _ => c.ChannelMode };
+        SelectedChannelMode = ChannelModes.First(m => m.Value == mode);
+        EnableDenoise = ReduceRoomTone = ReduceReverb = EnhanceVoiceEq = false;
+        UseAiProcessedAudio = EnableDeepFilterNet = EnableVoiceFixerDereverb = false;
+        EnableLimiter = true;
+        if (p.Extensions?.TryGetValue("desktop", out var native) == true)
+        {
+            bool Flag(string key) => native.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.True;
+            EnableDenoise = Flag("EnableDenoise"); ReduceRoomTone = Flag("ReduceRoomTone"); ReduceReverb = Flag("ReduceReverb"); EnhanceVoiceEq = Flag("EnhanceVoiceEq"); EnableLimiter = Flag("EnableLimiter");
+            if (native.TryGetProperty("DenoiseStrengthIndex", out var strength) && strength.TryGetInt32(out var n)) DenoiseStrengthIndex = n;
+            if (native.TryGetProperty("ReverbReductionAmount", out var reverb) && reverb.TryGetDouble(out var amount) && double.IsFinite(amount)) ReverbReductionAmount = amount;
+        }
+        EnableThreeBandEq = c.Tone?.EqEnabled ?? false;
+        LowEqDb = c.Tone?.LowEqDb ?? 0; MidEqDb = c.Tone?.MidEqDb ?? 0; HighEqDb = c.Tone?.HighEqDb ?? 0;
+        EnableDeEsser = c.Tone?.DeEsserEnabled ?? false; DeEsserAmount = c.Tone?.DeEsserAmount ?? 45;
+        PresetName = p.Name;
+        StatusText = p.Extensions?.ContainsKey("soundlab") == true
+            ? "已套用共用核心設定；SoundLab 人聲 EQ、降噪、修復未套用；共用三頻 EQ／齒音已按預設套用，桌面額外效果及 AI 已停用。防爆音預設開啟。"
+            : "已套用預設；AI、工具路徑與剪輯範圍不包含於共用預設。";
+    }
+    private void DeletePortablePreset_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedPortablePreset is { } p) { PortablePresets.Remove(p); SelectedPortablePreset = null; SaveSettings(); }
+    }
+    private void ImportPortablePresets_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "共用預設 JSON|*.json" };
+        if (dialog.ShowDialog(this) != true) return;
+        try
+        {
+            if (new FileInfo(dialog.FileName).Length > 1024 * 1024) throw new InvalidDataException("預設檔案不可超過 1 MB。");
+            var presets = PortablePresetFile.Parse(File.ReadAllText(dialog.FileName));
+            if (PortablePresets.Count + presets.Count > 100) throw new InvalidDataException("匯入後不得超過 100 組預設。");
+            foreach (var p in presets) PortablePresets.Add(p);
+            SelectedPortablePreset = presets[0]; SaveSettings();
+            StatusText = $"已匯入 {presets.Count} 組預設，按「套用」載入；其他工具專用效果不會等效轉換。";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException) { StatusText = ex.Message; }
+    }
+    private void ExportPortablePresets_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog { Filter = "共用預設 JSON|*.json", FileName = "AudioStudio_預設.json" };
+        if (dialog.ShowDialog(this) != true) return;
+        try
+        {
+            File.WriteAllText(dialog.FileName, PortablePresetFile.Serialize(PortablePresets.Count > 0 ? PortablePresets : [CapturePortablePreset()]));
+            StatusText = "已匯出共用預設，可在 SoundLab 匯入。";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { StatusText = ex.Message; }
+    }
+
     private void LoadSettings()
     {
         try
@@ -3134,6 +3253,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _deepFilterNetPath = settings.DeepFilterNetPath;
             _voiceFixerPath = settings.VoiceFixerPath;
 
+            LoudnessTarget = settings.LoudnessTarget;
+            RemoveSilence = settings.RemoveSilence;
+            SilencePaddingSeconds = settings.SilencePaddingSeconds;
+            if (settings.PortablePresets is { Count: > 0 })
+                foreach (var preset in PortablePresetFile.Parse(PortablePresetFile.Serialize(settings.PortablePresets))) PortablePresets.Add(preset);
             SilenceSeconds = settings.SilenceSeconds;
             SilenceThresholdDb = settings.SilenceThresholdDb;
             EnableDenoise = settings.EnableDenoise;
@@ -3152,6 +3276,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ? FfmpegAudioProcessor.DefaultReverbReductionAmount
                 : settings.ReverbReductionAmount;
             EnhanceVoiceEq = settings.EnhanceVoiceEq;
+            EnableThreeBandEq = settings.EnableThreeBandEq;
+            LowEqDb = settings.LowEqDb; MidEqDb = settings.MidEqDb; HighEqDb = settings.HighEqDb;
+            EnableDeEsser = settings.EnableDeEsser; DeEsserAmount = settings.DeEsserAmount;
             NormalizeLoudness = settings.NormalizeLoudness;
             EnableLimiter = settings.EnableLimiter;
             MergeSegments = settings.MergeSegments;
@@ -3186,6 +3313,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             OnPropertyChanged(nameof(VoiceFixerPathText));
             OnPropertyChanged(nameof(VoiceFixerStatusText));
         }
+        catch (InvalidDataException)
+        {
+        }
         catch (JsonException)
         {
         }
@@ -3215,6 +3345,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 CoverImagePath = _coverImagePath,
                 DeepFilterNetPath = _deepFilterNetPath,
                 VoiceFixerPath = _voiceFixerPath,
+                LoudnessTarget = LoudnessTarget,
+                RemoveSilence = RemoveSilence,
+                SilencePaddingSeconds = SilencePaddingSeconds,
+                PortablePresets = PortablePresets.ToList(),
                 SilenceSeconds = SilenceSeconds,
                 SilenceThresholdDb = SilenceThresholdDb,
                 EnableDenoise = EnableDenoise,
@@ -3231,6 +3365,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ReduceReverb = ReduceReverb,
                 ReverbReductionAmount = ReverbReductionAmount,
                 EnhanceVoiceEq = EnhanceVoiceEq,
+                EnableThreeBandEq = EnableThreeBandEq, LowEqDb = LowEqDb, MidEqDb = MidEqDb, HighEqDb = HighEqDb,
+                EnableDeEsser = EnableDeEsser, DeEsserAmount = DeEsserAmount,
                 NormalizeLoudness = NormalizeLoudness,
                 EnableLimiter = EnableLimiter,
                 MergeSegments = MergeSegments,
@@ -3346,6 +3482,93 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已拖曳調整合併順序。";
     }
 
+    private async void LoadWaveform_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanStartWork) return;
+        var item = _selectedFile;
+        if (item is null) { StatusText = "請先選取音檔。"; return; }
+        if (_ffmpegPath is null || !File.Exists(_ffmpegPath)) { StatusText = "請先指定 ffmpeg.exe。"; return; }
+        using var cancellation = new CancellationTokenSource();
+        _analysisCancellation = cancellation;
+        _waveformCancellation = cancellation;
+        IsAnalyzing = true;
+        WaveformText = "正在讀取完整原音波形，可按取消讀取。";
+        try
+        {
+            var waveform = await _processor.ReadWaveformAsync(_ffmpegPath, item.FilePath, cancellation.Token);
+            if (!ReferenceEquals(_selectedFile, item)) return;
+            OriginalWaveform.SetWaveform(waveform);
+            item.Duration = TimeSpan.FromSeconds(waveform.DurationSeconds);
+            UpdateWaveformRange();
+            UpdateWaveformPosition();
+        }
+        catch (OperationCanceledException)
+        {
+            if (ReferenceEquals(_selectedFile, item)) WaveformText = "波形讀取已取消。";
+        }
+        catch (Exception ex)
+        {
+            if (ReferenceEquals(_selectedFile, item)) WaveformText = $"波形讀取失敗：{ex.Message}";
+        }
+        finally
+        {
+            _analysisCancellation = null;
+            _waveformCancellation = null;
+            IsAnalyzing = false;
+            FinishPendingClose();
+        }
+    }
+
+    private void SelectedWaveformFile_Changed(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(AudioFileItem.TrimStartText) or nameof(AudioFileItem.TrimEndText)) UpdateWaveformRange();
+    }
+
+    private void UpdateWaveformRange()
+    {
+        if (_selectedFile is null || OriginalWaveform.Waveform is not { } waveform) return;
+        var valid = TryGetTrimRangeForDuration(_selectedFile, TimeSpan.FromSeconds(waveform.DurationSeconds),
+            out var start, out var end, out var error);
+        OriginalWaveform.SetRange(start?.TotalSeconds ?? 0, end?.TotalSeconds ?? waveform.DurationSeconds, valid);
+        WaveformText = valid
+            ? $"原音 {FormatTime(TimeSpan.FromSeconds(waveform.DurationSeconds))} · 點擊定位；金線內為保留範圍。方向鍵移動一秒。"
+            : $"剪輯範圍無效：{error}";
+    }
+
+    private void SeekOriginalWaveform(double seconds)
+    {
+        if (_selectedFile is null || OriginalWaveform.Waveform is null) return;
+        if (PlaybackSourceIndex != 0 || _player.Source is null)
+        {
+            PlaybackSourceIndex = 0; OpenSelectedForPlayback(false);
+            _pendingWaveformSeek = seconds;
+        }
+        _waveformPosition = seconds;
+        PositionSlider.Maximum = Math.Max(1, OriginalWaveform.Waveform.DurationSeconds);
+        PositionSlider.Value = seconds;
+        _player.Position = TimeSpan.FromSeconds(seconds);
+        PlaybackPositionText = FormatTime(TimeSpan.FromSeconds(seconds));
+        OriginalWaveform.SetPosition(seconds);
+    }
+
+    private void UpdateWaveformPosition()
+    {
+        if (OriginalWaveform is null) return;
+        if (PlaybackSourceIndex == 0) _waveformPosition = PositionSlider.Value;
+        OriginalWaveform.SetPosition(_waveformPosition);
+    }
+
+    private void SetTrimStartFromWaveform_Click(object sender, RoutedEventArgs e) => SetTrimFromWaveform(true);
+    private void SetTrimEndFromWaveform_Click(object sender, RoutedEventArgs e) => SetTrimFromWaveform(false);
+    private void SetTrimFromWaveform(bool start)
+    {
+        if (_selectedFile is null || OriginalWaveform.Waveform is null) { StatusText = "請先讀取原音波形。"; return; }
+        // Floor to milliseconds so a cursor at EOF cannot round past the actual source duration.
+        var text = (Math.Floor(_waveformPosition * 1000) / 1000).ToString("0.###", CultureInfo.InvariantCulture);
+        if (start) _selectedFile.TrimStartText = text; else _selectedFile.TrimEndText = text;
+        UpdateWaveformRange();
+    }
+
     private void PlaybackSource_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         OpenSelectedForPlayback(autoPlay: false);
@@ -3394,6 +3617,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void PositionSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        UpdateWaveformPosition();
         if (_isDraggingPosition)
         {
             PlaybackPositionText = FormatTime(TimeSpan.FromSeconds(PositionSlider.Value));
@@ -3407,6 +3631,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : TimeSpan.Zero;
 
         PositionSlider.Maximum = Math.Max(1, duration.TotalSeconds);
+        if (PlaybackSourceIndex == 0 && _pendingWaveformSeek is { } seek)
+        {
+            _pendingWaveformSeek = null;
+            PositionSlider.Value = Math.Min(duration.TotalSeconds, seek);
+            SeekToSlider();
+        }
         PlaybackDurationText = FormatTime(duration);
 
         if (_selectedFile is not null && _selectedFile.Duration is null && PlaybackSourceIndex == 0)
@@ -3454,9 +3684,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        _pendingWaveformSeek = null;
         _player.Open(new Uri(path));
         PositionSlider.Value = 0;
         PlaybackPositionText = "00:00";
+        PlaybackDurationText = "00:00";
         StatusText = autoPlay ? $"播放：{Path.GetFileName(path)}" : $"已載入：{Path.GetFileName(path)}";
 
         if (autoPlay)
@@ -3623,6 +3855,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         public string? VoiceFixerPath { get; set; }
 
+        public int LoudnessTarget { get; set; } = -16;
+        public bool RemoveSilence { get; set; } = true;
+        public double SilencePaddingSeconds { get; set; }
+        public List<PortablePreset>? PortablePresets { get; set; }
         public double SilenceSeconds { get; set; } = 0.1;
 
         public double SilenceThresholdDb { get; set; } = -35;
@@ -3650,6 +3886,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         public double ReverbReductionAmount { get; set; } = 0.6;
 
+        public bool EnableThreeBandEq { get; set; }
+        public double LowEqDb { get; set; }
+        public double MidEqDb { get; set; }
+        public double HighEqDb { get; set; }
+        public bool EnableDeEsser { get; set; }
+        public double DeEsserAmount { get; set; } = 45;
         public bool EnhanceVoiceEq { get; set; }
 
         public bool NormalizeLoudness { get; set; } = true;

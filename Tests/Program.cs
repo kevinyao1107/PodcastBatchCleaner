@@ -1,9 +1,19 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using PodcastBatchCleaner.Core.Models;
 using PodcastBatchCleaner.Core.Services;
 using PodcastBatchCleanerWpf;
+
+if (args.Any(a => a.Contains("waveform_fixture_cancel", StringComparison.Ordinal)))
+{
+    if (args.Contains("-show_entries")) { Console.WriteLine("2"); return 0; }
+    if (args.Contains("f32le"))
+    {
+        File.WriteAllText(args[Array.IndexOf(args, "-i") + 1], Environment.ProcessId.ToString());
+        await Task.Delay(TimeSpan.FromSeconds(30)); return 0;
+    }
+}
 
 if (args.Contains("-encoders"))
 {
@@ -66,6 +76,9 @@ static async Task<int> RunChecksAsync(string[] args)
     var createdFakeProbe = false;
     try
     {
+        await AlignmentChecks.RunAsync(ffmpeg, root);
+        await ToneChecks.RunAsync(ffmpeg, root);
+        await WaveformChecks.RunAsync(ffmpeg, root);
         RunUiChecks(root, args.Length > 2 ? args[2] : null);
         var parse = typeof(MainWindow).GetMethod("TryParseOptionalTime", BindingFlags.NonPublic | BindingFlags.Static)!;
         foreach (var input in new[] { "NaN", "Infinity", "1e300", "-1", "01:99", "-1:10" })
@@ -461,6 +474,15 @@ static async Task<int> RunChecksAsync(string[] args)
         createdFakeProbe = true;
         using (var cancel = new CancellationTokenSource())
         {
+            var marker = Path.Combine(root, "waveform_fixture_cancel.marker");
+            var task = processor.ReadWaveformAsync(Environment.ProcessPath!, marker, cancel.Token);
+            var pid = await WaitForMarkerAsync(marker);
+            cancel.Cancel();
+            await ExpectCanceledAsync(task);
+            Check(ProcessStopped(pid), "Cancel during PCM streaming kills waveform decoder before returning");
+        }
+        using (var cancel = new CancellationTokenSource())
+        {
             var marker = Path.Combine(root, "probe.marker");
             var task = processor.ProbeDurationAsync(Environment.ProcessPath!, marker, cancel.Token);
             var pid = await WaitForMarkerAsync(marker);
@@ -505,6 +527,22 @@ static void RunUiChecks(string root, string? snapshotDirectory)
         {
             var window = (MainWindow)typeof(MainWindow).GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance,
                 null, [typeof(bool)], null)!.Invoke([false]);
+            var sharedJson = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "fixtures", "portable-preset-v1.json"));
+            window.SelectedPortablePreset = PortablePresetFile.Parse(sharedJson)[0];
+            window.EnableDenoise = true; window.EnableDeepFilterNet = true; window.EnableVoiceFixerDereverb = true;
+            typeof(MainWindow).GetMethod("ApplyPortablePreset_Click", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [window, new System.Windows.RoutedEventArgs()]);
+            Check(window.LoudnessTarget == -18 && window.SilenceSeconds == 2 && window.SilencePaddingSeconds == .12 && window.SelectedChannelMode.Value == "left_mono",
+                "WPF applies every imported core parameter");
+            Check(!window.EnableDenoise && !window.EnableDeepFilterNet && !window.EnableVoiceFixerDereverb && window.StatusText.Contains("未套用"),
+                "WPF disables foreign DSP and AI and reports unsupported SoundLab effects");
+            window.SelectedPortablePreset = PortablePresetFile.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "fixtures", "portable-preset-v2.json")))[0];
+            typeof(MainWindow).GetMethod("ApplyPortablePreset_Click", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [window, new System.Windows.RoutedEventArgs()]);
+            Check(window.EnableThreeBandEq && window.LowEqDb == 3 && window.MidEqDb == -2 && window.HighEqDb == 1.5 && window.EnableDeEsser && window.DeEsserAmount == 70 && !window.EnhanceVoiceEq,
+                "WPF applies shared tone without enabling voice-thickening EQ");
+            window.LowEqDb = double.NaN; window.DeEsserAmount = double.PositiveInfinity;
+            Check(window.LowEqDb == 3 && window.DeEsserAmount == 70, "Invalid tone values cannot corrupt saved settings");
+            var captured = (PortablePreset)typeof(MainWindow).GetMethod("CapturePortablePreset", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, null)!;
+            Check(captured.Core.Tone == window.SelectedPortablePreset.Core.Tone, "WPF preset export retains tone controls");
             var tabs = FindVisualChild<System.Windows.Controls.TabControl>((System.Windows.DependencyObject)window.Content)!;
             tabs.SelectedIndex = 1;
             void Flush() => window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.DataBind);
@@ -564,6 +602,43 @@ static void RunUiChecks(string root, string? snapshotDirectory)
                 "Completed tool report retains successful AI stages and excludes the failed model");
             window.AudioFiles.Add(item);
             item.Status = "完成";
+            var wave = (PodcastBatchCleanerWpf.Controls.AudioWaveformView)window.FindName("OriginalWaveform")!;
+            var list = (System.Windows.Controls.ListView)window.FindName("AudioList")!;
+            list.SelectedItem = item;
+            item.Duration = TimeSpan.FromSeconds(10);
+            wave.SetWaveform(new AudioWaveform(Enumerable.Repeat(.5f, 100).ToArray(), 10, .1));
+            var flags = BindingFlags.NonPublic | BindingFlags.Instance;
+            typeof(MainWindow).GetMethod("SeekOriginalWaveform", flags)!.Invoke(window, [3.25d]);
+            typeof(MainWindow).GetMethod("SetTrimFromWaveform", flags)!.Invoke(window, [true]);
+            typeof(MainWindow).GetMethod("SeekOriginalWaveform", flags)!.Invoke(window, [8.75d]);
+            typeof(MainWindow).GetMethod("SetTrimFromWaveform", flags)!.Invoke(window, [false]);
+            Check(item.TrimStartText == "3.25" && item.TrimEndText == "8.75" && !window.WaveformText.Contains("無效"),
+                "Waveform cursor writes fractional trim bounds on the selected file");
+            item.TrimEndText = "2";
+            Check(window.WaveformText.Contains("無效"), "Editing trim fields immediately reports invalid waveform range");
+            item.TrimEndText = "8.75";
+            wave.Measure(new System.Windows.Size(400, 96)); wave.Arrange(new System.Windows.Rect(0, 0, 400, 96));
+            Check(wave.TimeAt(100) == 2.5 && wave.TimeAt(-1) == 0 && wave.TimeAt(401) == 10,
+                "Waveform click mapping clamps to the original source timeline");
+            window.PlaybackSourceIndex = 1;
+            var slider = (System.Windows.Controls.Slider)window.FindName("PositionSlider")!;
+            slider.Value = 1;
+            typeof(MainWindow).GetMethod("SetTrimFromWaveform", flags)!.Invoke(window, [false]);
+            Check(item.TrimEndText == "8.75", "Processed playback position cannot replace the original waveform cursor");
+            typeof(MainWindow).GetMethod("SeekOriginalWaveform", flags)!.Invoke(window, [6d]);
+            Check(window.PlaybackSourceIndex == 0 && slider.Value == 6, "Waveform seeking switches processed playback back to the original timeline");
+            using var waveCancel = new CancellationTokenSource();
+            typeof(MainWindow).GetField("_waveformCancellation", flags)!.SetValue(window, waveCancel);
+            var next = new AudioFileItem { FilePath = Path.Combine(root, "next.wav") };
+            window.AudioFiles.Add(next); list.SelectedItem = next;
+            Check(wave.Waveform is null && waveCancel.IsCancellationRequested,
+                "Changing selected files clears the old waveform and cancels its pending decode");
+            typeof(MainWindow).GetField("_waveformCancellation", flags)!.SetValue(window, null);
+            list.SelectedItem = item;
+            wave.SetWaveform(new AudioWaveform(Enumerable.Range(0,100).Select(i => i < 55 ? .1f + .6f*(float)Math.Abs(Math.Sin(i)) : .02f).ToArray(), 10, .1));
+            typeof(MainWindow).GetMethod("UpdateWaveformRange", flags)!.Invoke(window, null);
+            tabs.SelectedIndex = 3;
+            Flush();
             if (snapshotDirectory is not null)
             {
                 Directory.CreateDirectory(snapshotDirectory);
