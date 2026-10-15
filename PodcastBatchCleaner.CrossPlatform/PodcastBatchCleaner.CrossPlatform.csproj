@@ -1,23 +1,25 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
+    <DefineConstants>$(DefineConstants);CROSS_PLATFORM</DefineConstants>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.7" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.7" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.7" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.7" />
+    <PackageReference Include="Avalonia" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="11.3.7" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\Models\*.cs" Link="Models\%(Filename)%(Extension)" />
-    <Compile Include="..\Services\AudioWorkSessionFile.cs" Link="Services\AudioWorkSessionFile.cs" />
-    <Compile Include="..\Services\FfmpegAudioProcessor.cs" Link="Services\FfmpegAudioProcessor.cs" />
-    <Compile Include="..\Services\BundledAudioToolLocator.cs" Link="Services\BundledAudioToolLocator.cs" />
+    <Compile Include="..\Services\*.cs" Link="Services\%(Filename)%(Extension)" />
+    <Compile Include="..\MainWindow.xaml.cs" Link="Shared\DesktopWorkflow.cs" />
+    <Compile Include="..\Desktop\*.cs" Link="Shared\%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

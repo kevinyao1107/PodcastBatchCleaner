@@ -6,17 +6,37 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+#if CROSS_PLATFORM
+using Avalonia.Controls;
+using Avalonia.Interactivity;
+using Avalonia.Threading;
+using PodcastBatchCleaner.CrossPlatform.Services;
+using MediaPlayer = PodcastBatchCleaner.CrossPlatform.Services.FfplayAudioPlayer;
+using PlaybackPositionChangedEventArgs = Avalonia.Controls.Primitives.RangeBaseValueChangedEventArgs;
+using ExceptionEventArgs = PodcastBatchCleaner.CrossPlatform.Services.AudioPlaybackErrorEventArgs;
+using DesktopMessageBox = PodcastBatchCleaner.CrossPlatform.Services.DesktopMessageBox;
+#else
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using DesktopMessageBox = System.Windows.MessageBox;
+using PlaybackPositionChangedEventArgs = System.Windows.RoutedPropertyChangedEventArgs<double>;
+using Button = System.Windows.Controls.Button;
+#endif
 using PodcastBatchCleaner.Core.Models;
 using PodcastBatchCleaner.Core.Services;
+#if !CROSS_PLATFORM
 using Forms = System.Windows.Forms;
+#endif
 
+#if CROSS_PLATFORM
+namespace PodcastBatchCleaner.CrossPlatform;
+#else
 namespace PodcastBatchCleanerWpf;
+#endif
 
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
@@ -34,9 +54,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private static readonly TimeSpan PreviewDuration = TimeSpan.FromSeconds(30);
     private CancellationTokenSource? _processingCancellation;
     private CancellationTokenSource? _analysisCancellation;
+    private CancellationTokenSource? _folderLoadingCancellation;
+    private CancellationTokenSource? _durationLoadingCancellation;
+    private bool _isLoadingFiles;
     private AudioFileItem? _selectedFile;
+#if !CROSS_PLATFORM
     private AudioFileItem? _draggedAudioFile;
+#endif
+#if !CROSS_PLATFORM
     private System.Windows.Point _dragStartPoint;
+#endif
     private string? _currentFolder;
     private string? _outputFolder;
     private string? _aiAudioFolder;
@@ -106,14 +133,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _playbackPositionText = "00:00";
     private string _playbackDurationText = "00:00";
 
+#if !CROSS_PLATFORM
     public MainWindow() : this(loadSettings: true)
     {
     }
 
+#endif
+#if !CROSS_PLATFORM
     internal MainWindow(bool loadSettings)
     {
         InitializeComponent();
-        DataContext = this;
+        InitializeWorkspaceUi();
         OriginalWaveform.SeekRequested += SeekOriginalWaveform;
 
         _playbackTimer = new DispatcherTimer
@@ -126,9 +156,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _player.MediaEnded += Player_MediaEnded;
         _player.MediaFailed += Player_MediaFailed;
 
+        DataContext = this;
         if (loadSettings) LoadSettings();
     }
 
+#endif
     public ObservableCollection<AudioFileItem> AudioFiles { get; } = [];
 
     public IReadOnlyList<AudioOutputFormat> OutputFormats => FfmpegAudioProcessor.OutputFormats;
@@ -252,7 +284,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    public bool CanStartWork => !_isProcessing && !_isAnalyzing;
+    public bool IsLoadingFiles
+    {
+        get => _isLoadingFiles;
+        private set
+        {
+            if (!SetField(ref _isLoadingFiles, value)) return;
+            OnPropertyChanged(nameof(CanStartWork));
+            OnPropertyChanged(nameof(CanReviewEpisode));
+        }
+    }
+    public bool CanStartWork => !_isProcessing && !_isAnalyzing && !IsLoadingFiles;
 
     public string ProcessingWarningsText => string.Join(Environment.NewLine, _processingWarnings)
         + (_processingWarningCount > _processingWarnings.Count
@@ -562,7 +604,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         set => SetField(ref _playbackSourceIndex, value);
     }
 
+    #if CROSS_PLATFORM
+    public new event PropertyChangedEventHandler? PropertyChanged;
+#else
     public event PropertyChangedEventHandler? PropertyChanged;
+#endif
 
     private void ApplyPodcastPreset_Click(object sender, RoutedEventArgs e)
     {
@@ -642,6 +688,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         string statusText)
     {
         SilenceSeconds = silenceSeconds;
+        EnableAdvancedCleanup = false;
+        ApplyVoiceTuning(new());
         SilenceThresholdDb = silenceThresholdDb;
         EnableDenoise = enableDenoise;
         ReduceRoomTone = reduceRoomTone;
@@ -691,30 +739,38 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (!string.IsNullOrWhiteSpace(_currentFolder) && Directory.Exists(_currentFolder))
         {
-            await LoadAudioFilesAsync(_currentFolder);
+            try { await LoadAudioFilesAsync(_currentFolder); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { StatusText = $"無法載入上次資料夾：{ex.Message}"; }
         }
 
         await Task.CompletedTask;
     }
 
+#if !CROSS_PLATFORM
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
-        if (!CanStartWork)
+        if (!CanStartWork || _durationLoadingCancellation is not null)
         {
             e.Cancel = true;
             _closeAfterWork = true;
             _processingCancellation?.Cancel();
             _analysisCancellation?.Cancel();
+            _folderLoadingCancellation?.Cancel();
+            _durationLoadingCancellation?.Cancel();
             StatusText = "正在停止工作並關閉...";
             return;
         }
         SaveSettings();
         _processingCancellation?.Cancel();
         _analysisCancellation?.Cancel();
+        _durationLoadingCancellation?.Cancel();
         _playbackTimer.Stop();
         _player.Close();
     }
 
+#endif
+#if !CROSS_PLATFORM
     private async void SelectFolder_Click(object sender, RoutedEventArgs e)
     {
         using var dialog = new Forms.FolderBrowserDialog
@@ -729,14 +785,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        _currentFolder = dialog.SelectedPath;
-        _outputFolder ??= Path.Combine(_currentFolder, "processed");
-        OnPropertyChanged(nameof(CurrentFolderText));
-        OnPropertyChanged(nameof(OutputFolderText));
-
-        await LoadAudioFilesAsync(_currentFolder);
+        await LoadAudioFilesAsync(dialog.SelectedPath);
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void ChooseOutputFolder_Click(object sender, RoutedEventArgs e)
     {
         using var dialog = new Forms.FolderBrowserDialog
@@ -757,6 +810,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定輸出資料夾。";
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void ChooseAiAudioFolder_Click(object sender, RoutedEventArgs e)
     {
         using var dialog = new Forms.FolderBrowserDialog
@@ -778,6 +833,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定 AI 音檔資料夾。";
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void ChooseDeepFilterNet_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -799,6 +856,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定 DeepFilterNet。";
     }
 
+#endif
     private void ClearDeepFilterNet_Click(object sender, RoutedEventArgs e)
     {
         _deepFilterNetPath = null;
@@ -808,6 +866,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已清除 DeepFilterNet。";
     }
 
+#if !CROSS_PLATFORM
     private void ChooseVoiceFixer_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -829,6 +888,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定 VoiceFixer。";
     }
 
+#endif
     private void ClearVoiceFixer_Click(object sender, RoutedEventArgs e)
     {
         _voiceFixerPath = null;
@@ -838,6 +898,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已清除 VoiceFixer。";
     }
 
+#if !CROSS_PLATFORM
     private void ChooseIntroAudio_Click(object sender, RoutedEventArgs e)
     {
         var selectedPath = ChooseAudioFile("選取片頭音檔");
@@ -852,6 +913,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定片頭音檔。";
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void ChooseOutroAudio_Click(object sender, RoutedEventArgs e)
     {
         var selectedPath = ChooseAudioFile("選取片尾音檔");
@@ -866,6 +929,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定片尾音檔。";
     }
 
+#endif
     private void ClearIntroAudio_Click(object sender, RoutedEventArgs e)
     {
         _introAudioPath = null;
@@ -880,6 +944,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已清除片尾音檔。";
     }
 
+#if !CROSS_PLATFORM
     private void ChooseCoverImage_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -899,6 +964,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定封面圖片。";
     }
 
+#endif
     private void ClearCoverImage_Click(object sender, RoutedEventArgs e)
     {
         _coverImagePath = null;
@@ -906,6 +972,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已清除封面圖片。";
     }
 
+#if !CROSS_PLATFORM
     private string? ChooseAudioFile(string title)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -918,6 +985,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return dialog.ShowDialog(this) == true ? dialog.FileName : null;
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void ChooseFfmpeg_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -936,52 +1005,77 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已設定 FFmpeg。";
     }
 
+#endif
     private async Task LoadAudioFilesAsync(string folder)
     {
-        StopPlayback();
-        AudioFiles.Clear();
-        OnPropertyChanged(nameof(FileCountText));
-
+        _folderLoadingCancellation?.Cancel();
+        using var cancellation = new CancellationTokenSource();
+        _folderLoadingCancellation = cancellation;
+        _durationLoadingCancellation?.Cancel();
+        IsLoadingFiles = true;
         StatusText = "正在掃描資料夾...";
-
-        var files = await Task.Run(() => Directory
-            .EnumerateFiles(folder, "*.*", SearchOption.TopDirectoryOnly)
-            .Where(FfmpegAudioProcessor.IsSupportedAudioFile)
-            .OrderBy(path => path, StringComparer.CurrentCultureIgnoreCase)
-            .ToList());
-
-        foreach (var file in files)
+        try
         {
-            AudioFiles.Add(new AudioFileItem { FilePath = file });
-        }
+            var files = await Task.Run(() => Directory
+                .EnumerateFiles(folder, "*.*", SearchOption.TopDirectoryOnly)
+                .Where(path =>
+                {
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    return FfmpegAudioProcessor.IsSupportedAudioFile(path);
+                })
+                .OrderBy(path => path, StringComparer.CurrentCultureIgnoreCase).ToList(), cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (_folderLoadingCancellation != cancellation) return;
 
-        OnPropertyChanged(nameof(FileCountText));
-        StatusText = files.Count == 0 ? "這個資料夾沒有支援的音檔。" : $"已載入 {files.Count} 個音檔。";
-
-        if (_ffmpegPath is not null)
-        {
+            var previousDefault = _currentFolder is null ? null : Path.Combine(_currentFolder, "processed");
+            if (_outputFolder is null || string.Equals(_outputFolder, previousDefault,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                _outputFolder = Path.Combine(folder, "processed");
+            _currentFolder = folder;
+            StopPlayback(); _player.Close();
+            AudioFiles.Clear();
+            foreach (var file in files) AudioFiles.Add(new AudioFileItem { FilePath = file });
+            OnPropertyChanged(nameof(CurrentFolderText)); OnPropertyChanged(nameof(OutputFolderText));
+            OnPropertyChanged(nameof(FileCountText));
+            StatusText = files.Count == 0 ? "這個資料夾沒有支援的音檔。" : $"已載入 {files.Count} 個音檔。";
             _ = LoadDurationsAsync(AudioFiles.ToList());
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (_folderLoadingCancellation == cancellation) StatusText = $"載入資料夾失敗：{ex.Message}";
+        }
+        finally
+        {
+            if (_folderLoadingCancellation == cancellation)
+            {
+                _folderLoadingCancellation = null; IsLoadingFiles = false; FinishPendingClose();
+            }
         }
     }
 
     private async Task LoadDurationsAsync(IReadOnlyList<AudioFileItem> items)
     {
+        _durationLoadingCancellation?.Cancel();
+        using var cancellation = new CancellationTokenSource();
+        _durationLoadingCancellation = cancellation;
         var ffmpegPath = _ffmpegPath;
-        if (ffmpegPath is null)
+        try
         {
-            return;
+            if (ffmpegPath is null) return;
+            foreach (var item in items)
+            {
+                cancellation.Token.ThrowIfCancellationRequested();
+                try { item.Duration = await _processor.ProbeDurationAsync(ffmpegPath, item.FilePath, cancellation.Token); }
+                catch (OperationCanceledException) { throw; }
+                catch { item.Duration = null; }
+            }
         }
-
-        foreach (var item in items)
+        catch (OperationCanceledException) { }
+        finally
         {
-            try
-            {
-                item.Duration = await _processor.ProbeDurationAsync(ffmpegPath, item.FilePath);
-            }
-            catch
-            {
-                item.Duration = null;
-            }
+            if (_durationLoadingCancellation == cancellation)
+            { _durationLoadingCancellation = null; FinishPendingClose(); }
         }
     }
 
@@ -1143,7 +1237,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         AudioFiles.Move(currentIndex, nextIndex);
         AudioList.SelectedItem = selected;
+#if CROSS_PLATFORM
+        AudioList.ScrollIntoView(selected, null);
+#else
         AudioList.ScrollIntoView(selected);
+#endif
         StatusText = "已調整合併順序。";
     }
 
@@ -1186,8 +1284,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        Directory.CreateDirectory(_outputFolder);
-
         IsProcessing = true;
         _processingCancellation = new CancellationTokenSource();
         IsProgressVisible = true;
@@ -1215,7 +1311,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SelectedChannelMode,
             StereoBalance,
             _outputFolder,
-            DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount);
+            DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount, EnableAdvancedCleanup ? _cleanupTuning : null, _voiceTuning);
 
         var progressWindow = new ProcessingProgressWindow
         {
@@ -1978,7 +2074,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             item.Status = "比較失敗";
             StatusText = $"A/B 比較失敗：{ex.Message}";
-            System.Windows.MessageBox.Show(this, ex.Message, "A/B 比較失敗", MessageBoxButton.OK, MessageBoxImage.Warning);
+            DesktopMessageBox.Show(this, ex.Message, "A/B 比較失敗", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally
         {
@@ -2167,7 +2263,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 SelectedChannelMode,
                 StereoBalance,
                 previewFolder,
-                DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount);
+                DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount, EnableAdvancedCleanup ? _cleanupTuning : null, _voiceTuning);
 
             var outputPath = FfmpegAudioProcessor.MakeOutputPath(
                 item.FilePath,
@@ -2219,7 +2315,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             item.Status = "試聽失敗";
             StatusText = $"試聽失敗：{ex.Message}";
-            System.Windows.MessageBox.Show(this, ex.Message, "試聽失敗", MessageBoxButton.OK, MessageBoxImage.Warning);
+            DesktopMessageBox.Show(this, ex.Message, "試聽失敗", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally
         {
@@ -2642,7 +2738,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         => CreateComparisonPresetsForOptions(new AudioProcessingOptions(
             SilenceSeconds, SilenceThresholdDb, EnableDenoise, ReduceRoomTone, ReduceReverb,
             ReverbReductionAmount, EnhanceVoiceEq, NormalizeLoudness, EnableLimiter,
-            VolumeGainDb, SelectedChannelMode, StereoBalance, _outputFolder ?? string.Empty, DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount));
+            VolumeGainDb, SelectedChannelMode, StereoBalance, _outputFolder ?? string.Empty, DenoiseReductionDb, RemoveSilence, LoudnessTarget, SilencePaddingSeconds, EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount, EnableAdvancedCleanup ? _cleanupTuning : null, _voiceTuning));
 
     private static IReadOnlyList<ComparisonPreset> CreateComparisonPresetsForOptions(AudioProcessingOptions currentOptions)
     {
@@ -2762,7 +2858,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             message.AppendLine($"- {Path.GetFileName(output)}");
         }
 
-        System.Windows.MessageBox.Show(this, message.ToString(), "A/B 比較", MessageBoxButton.OK, MessageBoxImage.Information);
+        DesktopMessageBox.Show(this, message.ToString(), "A/B 比較", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private async Task<string> EnsureOutputEncoderAsync(string ffmpegPath, ProcessingProgressWindow progressWindow,
@@ -2872,7 +2968,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             message.AppendLine($"...另有 {errors.Count - 10} 個問題");
         }
 
-        System.Windows.MessageBox.Show(
+        DesktopMessageBox.Show(
             this,
             message.ToString(),
             "處理前檢查",
@@ -2929,7 +3025,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ? MessageBoxImage.Information
                 : MessageBoxImage.Information;
 
-        System.Windows.MessageBox.Show(this, message.ToString(), "處理摘要", MessageBoxButton.OK, icon);
+        DesktopMessageBox.Show(this, message.ToString(), "處理摘要", MessageBoxButton.OK, icon);
     }
 
     private static string FormatAnalysisText(string label, string path, AudioQualityAnalysis analysis)
@@ -3086,7 +3182,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (_closeAfterWork && CanStartWork)
         {
+            #if CROSS_PLATFORM
+            Dispatcher.UIThread.Post(Close);
+#else
             Dispatcher.BeginInvoke(new Action(Close));
+#endif
         }
     }
 
@@ -3161,7 +3261,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var channel = SelectedChannelMode.Value switch { "keep" => "source", "mono" => "mono", "left_mono" => "left", "right_mono" => "right", "swap" => "swap", _ => throw new InvalidDataException("共用預設支援保留、Mono、左／右 Mono 或左右互換。請先切換聲道模式；置中與手動平衡無法等效交換。") };
         var core = new PortableCore(VolumeGainDb, NormalizeLoudness, LoudnessTarget, RemoveSilence, SilenceThresholdDb, SilenceSeconds, SilencePaddingSeconds, channel, new PortableTone(EnableThreeBandEq, LowEqDb, MidEqDb, HighEqDb, EnableDeEsser, DeEsserAmount));
         PortablePresetFile.Validate(core);
-        var native = JsonSerializer.SerializeToElement(new { EnableDenoise, DenoiseStrengthIndex, ReduceRoomTone, ReduceReverb, ReverbReductionAmount, EnhanceVoiceEq, EnableLimiter });
+        var native = JsonSerializer.SerializeToElement(new { EnableDenoise, DenoiseStrengthIndex, ReduceRoomTone, ReduceReverb, ReverbReductionAmount, EnhanceVoiceEq, EnableLimiter, EnableAdvancedCleanup, CleanupTuning = _cleanupTuning, VoiceTuning = _voiceTuning });
         return new PortablePreset(PresetName.Trim(), core, new() { ["desktop"] = native });
     }
     private void SavePortablePreset_Click(object sender, RoutedEventArgs e)
@@ -3179,7 +3279,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ApplyPortablePreset_Click(object sender, RoutedEventArgs e)
     {
         if (SelectedPortablePreset is not { } p) return;
+        var cleanup = new AudioCleanupTuning();
+        var voice = new VoiceToneTuning();
+        var advancedCleanup = false;
+        try
+        {
+            if (p.Extensions?.TryGetValue("desktop", out var extension) == true)
+            {
+                if (extension.ValueKind != JsonValueKind.Object) throw new InvalidDataException("桌面預設內容不正確。");
+                if (extension.TryGetProperty("CleanupTuning", out var tuning) && tuning.ValueKind != JsonValueKind.Null)
+                    cleanup = tuning.Deserialize<AudioCleanupTuning>() ?? throw new InvalidDataException("清理參數缺少內容。");
+                cleanup.Validate();
+                if (extension.TryGetProperty("VoiceTuning", out var voiceJson) && voiceJson.ValueKind != JsonValueKind.Null)
+                    voice = voiceJson.Deserialize<VoiceToneTuning>() ?? throw new InvalidDataException("人聲參數缺少內容。");
+                voice.Validate();
+                advancedCleanup = extension.TryGetProperty("EnableAdvancedCleanup", out var enabled) && enabled.ValueKind == JsonValueKind.True;
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException)
+        { StatusText = $"預設未套用：{ex.Message}"; return; }
         var c = p.Core;
+        ApplyCleanupTuning(cleanup); EnableAdvancedCleanup = advancedCleanup; ApplyVoiceTuning(voice);
         VolumeGainDb = c.GainDb; NormalizeLoudness = c.LoudnessEnabled; LoudnessTarget = c.LoudnessTarget;
         RemoveSilence = c.SilenceTrimEnabled; SilenceSeconds = c.MinimumSilenceSeconds; SilenceThresholdDb = c.SilenceThresholdDb; SilencePaddingSeconds = c.SilencePaddingSeconds;
         var mode = c.ChannelMode switch { "source" => "keep", "left" => "left_mono", "right" => "right_mono", _ => c.ChannelMode };
@@ -3206,6 +3326,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (SelectedPortablePreset is { } p) { PortablePresets.Remove(p); SelectedPortablePreset = null; SaveSettings(); }
     }
+#if !CROSS_PLATFORM
     private void ImportPortablePresets_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "共用預設 JSON|*.json" };
@@ -3221,6 +3342,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException) { StatusText = ex.Message; }
     }
+#endif
+#if !CROSS_PLATFORM
     private void ExportPortablePresets_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.SaveFileDialog { Filter = "共用預設 JSON|*.json", FileName = "AudioStudio_預設.json" };
@@ -3233,6 +3356,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { StatusText = ex.Message; }
     }
 
+#endif
     private string _workSessionText = "尚未保存工作檔。";
     public string WorkSessionText { get => _workSessionText; private set => SetField(ref _workSessionText, value); }
     private string? _lastMergedOutputPath;
@@ -3242,6 +3366,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool CanPlayEpisode => _lastMergedOutputPath is not null && File.Exists(_lastMergedOutputPath);
     public bool CanReviewEpisode => CanPlayEpisode && CanStartWork;
 
+#if !CROSS_PLATFORM
     private void SaveWork_Click(object sender, RoutedEventArgs e)
     {
         if (!CanStartWork) return;
@@ -3251,6 +3376,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or ArgumentException)
         { WorkSessionText = $"保存工作檔失敗：{ex.Message}"; StatusText = WorkSessionText; }
     }
+#endif
+#if !CROSS_PLATFORM
     private void LoadWork_Click(object sender, RoutedEventArgs e)
     {
         if (!CanStartWork) return;
@@ -3260,8 +3387,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or ArgumentException)
         { WorkSessionText = $"恢復工作檔失敗：{ex.Message}"; StatusText = WorkSessionText; }
     }
+#endif
     private static string? WorkPath(string? path, string folder, bool save) => string.IsNullOrWhiteSpace(path) ? null
-        : save ? Path.GetRelativePath(folder, path) : AudioWorkSessionFile.ResolvePath(path, folder);
+        : save ? AudioWorkSessionFile.RelativePath(path, folder) : AudioWorkSessionFile.ResolvePath(path, folder);
     private static void ConvertWorkPaths(AppSettings settings, string folder, bool save)
     {
         settings.CurrentFolder = WorkPath(settings.CurrentFolder, folder, save);
@@ -3278,7 +3406,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         settings.FfmpegPath = settings.DeepFilterNetPath = settings.VoiceFixerPath = null;
         settings.PortablePresets = null;
         ConvertWorkPaths(settings, folder, true);
-        var files = AudioFiles.Select(item => new WorkAudioFile(Path.GetRelativePath(folder, item.FilePath),
+        var files = AudioFiles.Select(item => new WorkAudioFile(AudioWorkSessionFile.RelativePath(item.FilePath, folder),
             item.CustomOutputFileName, item.TrimStartText, item.TrimEndText)).ToList();
         AudioWorkSessionFile.Write(path, new AudioWorkSession(AudioWorkSessionFile.Format, 1, JsonSerializer.SerializeToElement(settings), files));
         WorkSessionText = $"已保存工作檔：{Path.GetFileName(path)}（{files.Count} 個音檔；只保存路徑與設定）";
@@ -3300,6 +3428,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (new[] { "OutputFormatExtension", "ChannelModeValue", "VolumeGainDb", "LoudnessTarget", "MergeSegments", "MergeGapSeconds", "SilenceSeconds", "SilenceThresholdDb" }.Any(key => !fields.Contains(key)))
             throw new InvalidDataException("工作檔缺少必要的處理設定。");
         var settings = work.Settings.Deserialize<AppSettings>() ?? throw new InvalidDataException("工作檔設定不正確。");
+        settings.CleanupTuning?.Validate();
+        settings.VoiceTuning?.Validate();
         if (!FfmpegAudioProcessor.OutputFormats.Any(format => format.Extension == settings.OutputFormatExtension) ||
             !FfmpegAudioProcessor.ChannelModes.Any(mode => mode.Value == settings.ChannelModeValue))
             throw new InvalidDataException("工作檔輸出格式或聲道模式不支援。");
@@ -3314,6 +3444,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         settings.FfmpegPath = _ffmpegPath; settings.DeepFilterNetPath = _deepFilterNetPath; settings.VoiceFixerPath = _voiceFixerPath;
         settings.PortablePresets = null;
         StopPlayback(); _player.Close(); _waveformCancellation?.Cancel();
+        _durationLoadingCancellation?.Cancel();
         PlaybackSourceIndex = 0;
         ApplyAppSettings(settings);
         _loadedDeepFilterNetPreference = true;
@@ -3335,6 +3466,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = $"已恢復工作：{Path.GetFileName(path)}，{restored.Count} 個音檔，{missing.Count} 個缺失來源／附件。";
         if (_ffmpegPath is not null && File.Exists(_ffmpegPath)) _ = LoadDurationsAsync(restored.Where(item => File.Exists(item.FilePath)).ToList());
     }
+#if !CROSS_PLATFORM
     private void RelinkWorkAudio_Click(object sender, RoutedEventArgs e)
     {
         if (!CanStartWork || _selectedFile is null) return;
@@ -3344,6 +3476,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         { WorkSessionText = $"重新指定音檔失敗：{ex.Message}"; StatusText = WorkSessionText; }
     }
+#endif
     private void RelinkWorkAudio(string path)
     {
         if (_selectedFile is null || !File.Exists(path)) throw new InvalidDataException("找不到替代音檔。");
@@ -3360,7 +3493,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
     private void EpisodeChapter_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is System.Windows.Controls.Button { Tag: double seconds }) SeekEpisode(seconds);
+        if (sender is Button { Tag: double seconds }) SeekEpisode(seconds);
     }
     private void SeekEpisode(double seconds)
     {
@@ -3415,6 +3548,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ApplyAppSettings(AppSettings settings)
     {
+            var cleanup = settings.CleanupTuning ?? new AudioCleanupTuning();
+            cleanup.Validate();
+            settings.VoiceTuning?.Validate();
+            ApplyCleanupTuning(cleanup); EnableAdvancedCleanup = settings.EnableAdvancedCleanup;
+            ApplyVoiceTuning(settings.VoiceTuning ?? new());
             _currentFolder = settings.CurrentFolder;
             _outputFolder = settings.OutputFolder;
             _aiAudioFolder = settings.AiAudioFolder;
@@ -3488,6 +3626,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void SaveSettings()
     {
+#if CROSS_PLATFORM
+        if (!_persistUserSettings) return;
+#endif
         try
         {
             var settingsPath = GetSettingsPath();
@@ -3527,6 +3668,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 SilenceThresholdDb = SilenceThresholdDb,
                 EnableDenoise = EnableDenoise,
                 DenoiseStrengthIndex = DenoiseStrengthIndex,
+                EnableAdvancedCleanup = EnableAdvancedCleanup,
+                CleanupTuning = _cleanupTuning,
+                VoiceTuning = _voiceTuning,
                 VoiceFixerMix = VoiceFixerMix,
                 MatchComparisonLoudness = MatchComparisonLoudness,
                 UseAiProcessedAudio = UseAiProcessedAudio,
@@ -3583,11 +3727,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+#if !CROSS_PLATFORM
     private void AudioList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         OpenSelectedForPlayback(autoPlay: true);
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void AudioList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         _dragStartPoint = e.GetPosition(null);
@@ -3602,6 +3749,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _draggedAudioFile = listViewItem?.DataContext as AudioFileItem;
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void AudioList_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
         if (e.LeftButton != MouseButtonState.Pressed || _draggedAudioFile is null)
@@ -3619,6 +3768,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         DragDrop.DoDragDrop(AudioList, _draggedAudioFile, System.Windows.DragDropEffects.Move);
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void AudioList_Drop(object sender, System.Windows.DragEventArgs e)
     {
         if (!e.Data.GetDataPresent(typeof(AudioFileItem)))
@@ -3646,6 +3797,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已拖曳調整合併順序。";
     }
 
+#endif
     private async void LoadWaveform_Click(object sender, RoutedEventArgs e)
     {
         if (!CanStartWork) return;
@@ -3685,7 +3837,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void SelectedWaveformFile_Changed(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(AudioFileItem.TrimStartText) or nameof(AudioFileItem.TrimEndText)) UpdateWaveformRange();
+        if (e.PropertyName is nameof(AudioFileItem.TrimStartText) or nameof(AudioFileItem.TrimEndText))
+        { UpdateWaveformRange(); RefreshEffectPreview(); }
     }
 
     private void UpdateWaveformRange()
@@ -3740,6 +3893,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Play_Click(object sender, RoutedEventArgs e)
     {
+        if (PlaybackSourceIndex == 3 && !CanPlayEffectPreview)
+        { OpenSelectedForPlayback(false); StatusText = "單項比較尚未就緒或已過期。"; return; }
         if (PlaybackSourceIndex == 2 && !CanReviewEpisode) { StatusText = "整集尚未就緒，或正在處理音檔。"; return; }
         if (PlaybackSourceIndex == 2 && _player.Source?.LocalPath != _lastMergedOutputPath) { OpenSelectedForPlayback(true); return; }
         if (_selectedFile is null && PlaybackSourceIndex != 2)
@@ -3770,18 +3925,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StopPlayback();
     }
 
+#if !CROSS_PLATFORM
     private void PositionSlider_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         _isDraggingPosition = true;
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void PositionSlider_PreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
         _isDraggingPosition = false;
         SeekToSlider();
     }
 
-    private void PositionSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+#endif
+    private void PositionSlider_ValueChanged(object sender, PlaybackPositionChangedEventArgs e)
     {
         UpdateWaveformPosition();
         if (_isDraggingPosition)
@@ -3808,6 +3967,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _pendingEpisodeSeek = null; PositionSlider.Value = Math.Min(duration.TotalSeconds, chapterSeek); SeekToSlider();
         }
         PlaybackDurationText = FormatTime(duration);
+        if (PlaybackSourceIndex == 3 && _pendingEffectSeek is { } effectSeek)
+        {
+            _pendingEffectSeek = null; PositionSlider.Value = Math.Min(duration.TotalSeconds, effectSeek); SeekToSlider();
+        }
 
         if (_selectedFile is not null && _selectedFile.Duration is null && PlaybackSourceIndex == 0)
         {
@@ -3843,11 +4006,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void OpenSelectedForPlayback(bool autoPlay)
     {
         if (PlaybackSourceIndex == 2 && !CanStartWork) { StatusText = "處理完成後才能驗收整集。"; return; }
+        _playbackTimer.Stop();
+        _player.Close();
+        _pendingWaveformSeek = null;
+        _pendingEpisodeSeek = null;
+        PositionSlider.Value = 0;
+        PositionSlider.Maximum = 1;
+        PlaybackPositionText = PlaybackDurationText = "00:00";
         if (_selectedFile is null && PlaybackSourceIndex != 2) return;
         var path = PlaybackSourceIndex == 2 ? (CanPlayEpisode ? _lastMergedOutputPath : null) : GetPlaybackPath(_selectedFile!);
         if (path is null)
         {
             StatusText = "這個音檔還沒有處理後版本。";
+            return;
+        }
+        if (!File.Exists(path))
+        {
+            StatusText = "找不到播放檔案，請重新指定音檔或重新輸出。";
             return;
         }
 
@@ -3868,6 +4043,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private string? GetPlaybackPath(AudioFileItem item)
     {
+        if (PlaybackSourceIndex == 3) return CanPlayEffectPreview ? _effectPlaybackPath : null;
         if (PlaybackSourceIndex == 1)
         {
             return item.HasProcessedFile ? item.ProcessedPath : null;
@@ -3896,6 +4072,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StatusText = "已停止。";
     }
 
+#if !CROSS_PLATFORM
     private void OpenFolder(string folder)
     {
         try
@@ -3914,6 +4091,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+#endif
+#if !CROSS_PLATFORM
     private void OpenFileLocation(string filePath)
     {
         if (!File.Exists(filePath))
@@ -3938,6 +4117,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+#endif
     private static string FormatTime(TimeSpan value)
     {
         return value.TotalHours >= 1
@@ -3945,6 +4125,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : value.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
     }
 
+#if !CROSS_PLATFORM
     private static T? FindAncestor<T>(DependencyObject? current)
         where T : DependencyObject
     {
@@ -3961,6 +4142,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return null;
     }
 
+#endif
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {
         if (EqualityComparer<T>.Default.Equals(field, value))
@@ -3976,6 +4158,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        if (propertyName is nameof(SelectedFileText) or nameof(FileCountText) or nameof(CanStartWork)
+            or nameof(MergeSegments) or nameof(PlaybackSourceIndex) or nameof(CanReviewEpisode) or nameof(ProcessingToolsText))
+            RefreshWorkspaceUi();
+        if (propertyName is nameof(SelectedFileText) or nameof(CanStartWork) or nameof(SelectedCleanupEffect)
+            or nameof(VoiceThicknessDb) or nameof(VoiceClarityDb) or nameof(UseVoiceCompression)
+            or nameof(EnableAdvancedCleanup) or nameof(TrackNoise) or nameof(FineDenoiseDb) or nameof(NoiseFloorDb)
+            or nameof(RoomHighpassHz) or nameof(RoomFrequencyHz) or nameof(RoomReductionDb)
+            or nameof(TailThresholdDb) or nameof(TailReleaseMs) or nameof(DenoiseStrengthIndex) or nameof(ReverbReductionAmount))
+            RefreshEffectPreview();
     }
 
     private sealed class ProcessingRunSummary(int totalCount, string outputFolder, bool isMergedOutput)
@@ -4005,6 +4196,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private sealed class AppSettings
     {
+        public bool EnableAdvancedCleanup { get; set; }
+        public AudioCleanupTuning? CleanupTuning { get; set; }
+        public VoiceToneTuning? VoiceTuning { get; set; }
         public string? CurrentFolder { get; set; }
 
         public string? OutputFolder { get; set; }

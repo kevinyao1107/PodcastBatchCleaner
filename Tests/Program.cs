@@ -78,6 +78,7 @@ static async Task<int> RunChecksAsync(string[] args)
     {
         await AlignmentChecks.RunAsync(ffmpeg, root);
         await ToneChecks.RunAsync(ffmpeg, root);
+        await CleanupTuningChecks.RunAsync(ffmpeg, root);
         await WaveformChecks.RunAsync(ffmpeg, root);
         await WorkSessionChecks.RunAsync(ffmpeg, root, args.Length > 2 ? args[2] : null);
         RunUiChecks(root, args.Length > 2 ? args[2] : null);
@@ -528,6 +529,10 @@ static void RunUiChecks(string root, string? snapshotDirectory)
         {
             var window = (MainWindow)typeof(MainWindow).GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance,
                 null, [typeof(bool)], null)!.Invoke([false]);
+            Check(window.HasNoAudioFiles && !window.CanExportAll && !window.CanExportSelection,
+                "WPF empty workspace disables export and exposes its import state");
+            Check(!((System.Windows.Controls.Expander)window.FindName("PresetManager")!).IsExpanded,
+                "WPF preset administration starts collapsed");
             var sharedJson = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "fixtures", "portable-preset-v1.json"));
             window.SelectedPortablePreset = PortablePresetFile.Parse(sharedJson)[0];
             window.EnableDenoise = true; window.EnableDeepFilterNet = true; window.EnableVoiceFixerDereverb = true;
@@ -606,6 +611,18 @@ static void RunUiChecks(string root, string? snapshotDirectory)
             var wave = (PodcastBatchCleanerWpf.Controls.AudioWaveformView)window.FindName("OriginalWaveform")!;
             var list = (System.Windows.Controls.ListView)window.FindName("AudioList")!;
             list.SelectedItem = item;
+            Check(((System.Windows.Controls.GridView)list.View).Columns.Count == 3 && window.SelectedAudioItem == item,
+                "WPF uses a compact table and a selected-file inspector");
+            var nameEditor = (System.Windows.Controls.TextBox)window.FindName("SelectedOutputNameTextBox")!;
+            nameEditor.Text = "inspector-test";
+            nameEditor.GetBindingExpression(System.Windows.Controls.TextBox.TextProperty)!.UpdateSource();
+            Check(item.CustomOutputFileName == "inspector-test", "WPF inspector updates the selected output filename");
+            nameEditor.Text = string.Empty;
+            nameEditor.GetBindingExpression(System.Windows.Controls.TextBox.TextProperty)!.UpdateSource();
+            Check(window.CanExportSelection && window.OutputScopeText.Contains("1 / 1"), "WPF export scope follows the selected recording");
+            window.MergeSegments = true;
+            Check(window.ExportSelectedText == "合併選取", "WPF export commands reflect merge mode");
+            window.MergeSegments = false;
             item.Duration = TimeSpan.FromSeconds(10);
             wave.SetWaveform(new AudioWaveform(Enumerable.Repeat(.5f, 100).ToArray(), 10, .1));
             var flags = BindingFlags.NonPublic | BindingFlags.Instance;
@@ -658,6 +675,27 @@ static void RunUiChecks(string root, string? snapshotDirectory)
                     encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
                     using var file = File.Create(Path.Combine(snapshotDirectory, $"ui_{width}x{height}.png"));
                     encoder.Save(file);
+                }
+                expander.IsExpanded = false;
+                foreach (var (width, height) in new[] { (1180, 760), (980, 640) })
+                {
+                    for (var tabIndex = 0; tabIndex < 4; tabIndex++)
+                    {
+                        tabs.SelectedIndex = tabIndex; Flush();
+                        var content = (System.Windows.FrameworkElement)window.Content;
+                        content.Measure(new System.Windows.Size(width, height));
+                        content.Arrange(new System.Windows.Rect(0, 0, width, height)); content.UpdateLayout();
+                        var playerBar = (System.Windows.FrameworkElement)window.FindName("PersistentPlayer")!;
+                        var location = playerBar.TransformToAncestor(content).Transform(new System.Windows.Point());
+                        Check(playerBar.Visibility == System.Windows.Visibility.Visible && playerBar.ActualHeight > 0
+                            && location.Y >= 0 && location.Y + playerBar.ActualHeight <= height,
+                            $"WPF player remains in view on tab {tabIndex} at {width}");
+                        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(width, height, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+                        bitmap.Render(content);
+                        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+                        using var screenshot = File.Create(Path.Combine(snapshotDirectory, $"workspace_{tabIndex}_{width}.png")); encoder.Save(screenshot);
+                    }
                 }
             }
             busy.SetValue(window, true);
@@ -764,7 +802,11 @@ static async Task<int> WaitForMarkerAsync(string path)
     var clock = Stopwatch.StartNew();
     while (clock.Elapsed < TimeSpan.FromSeconds(10))
     {
-        if (File.Exists(path) && int.TryParse(await File.ReadAllTextAsync(path), out var pid)) return pid;
+        try
+        {
+            if (File.Exists(path) && int.TryParse(await File.ReadAllTextAsync(path), out var pid)) return pid;
+        }
+        catch (IOException) { } // The helper may still hold the newly created marker open.
         await Task.Delay(20);
     }
     throw new TimeoutException("External process did not start.");

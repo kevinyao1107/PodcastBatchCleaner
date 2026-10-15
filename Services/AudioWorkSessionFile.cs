@@ -39,10 +39,20 @@ public static class AudioWorkSessionFile
         try { File.WriteAllText(temp, json); File.Move(temp, path, overwrite: true); }
         finally { if (File.Exists(temp)) File.Delete(temp); }
     }
+    public static string RelativePath(string path, string projectFolder)
+        => Path.GetRelativePath(projectFolder, path).Replace(Path.DirectorySeparatorChar, '/');
+
     public static string ResolvePath(string path, string projectFolder)
     {
         if (string.IsNullOrWhiteSpace(path) || path.Contains('\0')) throw new InvalidDataException("來源路徑不正確。");
-        try { return Path.GetFullPath(path, projectFolder); }
+        try
+        {
+            var resolved = Path.GetFullPath(path, projectFolder);
+            // Older Windows work files used backslashes for relative source and attachment paths.
+            if (!OperatingSystem.IsWindows() && path.Contains('\\') && !File.Exists(resolved) && !Directory.Exists(resolved))
+                return Path.GetFullPath(path.Replace('\\', '/'), projectFolder);
+            return resolved;
+        }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         { throw new InvalidDataException("來源路徑不正確。", ex); }
     }

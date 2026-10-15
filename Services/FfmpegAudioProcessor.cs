@@ -27,7 +27,9 @@ public sealed record AudioProcessingOptions(
     double SilencePaddingSeconds = 0,
     bool EnableThreeBandEq = false,
     double LowEqDb = 0, double MidEqDb = 0, double HighEqDb = 0,
-    bool EnableDeEsser = false, double DeEsserAmount = 45);
+    bool EnableDeEsser = false, double DeEsserAmount = 45,
+    AudioCleanupTuning? CleanupTuning = null,
+    VoiceToneTuning? VoiceTuning = null);
 
 public sealed record AudioProcessingProgress(
     double Percent,
@@ -868,6 +870,9 @@ public sealed class FfmpegAudioProcessor
 
         var candidates = new[]
         {
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
             Path.Combine(baseDirectory ?? AppContext.BaseDirectory, fileName),
             Path.Combine(baseDirectory ?? AppContext.BaseDirectory, "tools", fileName),
             Path.Combine(
@@ -907,6 +912,8 @@ public sealed class FfmpegAudioProcessor
     private static string BuildFilters(AudioProcessingOptions options, bool lossyOutput = false)
     {
         ValidateLoudnessTarget(options.LoudnessTarget);
+        var tuning = options.CleanupTuning;
+        tuning?.Validate();
         var silenceSeconds = Math.Clamp(Math.Round(options.SilenceSeconds, 1), 0.1, 10.0);
         var padding = Math.Clamp(options.SilencePaddingSeconds, 0, .5);
         var threshold = Math.Clamp(options.SilenceThresholdDb, -80, -5);
@@ -925,13 +932,15 @@ public sealed class FfmpegAudioProcessor
         if (options.EnableDenoise)
         {
             filters.Add(string.Create(CultureInfo.InvariantCulture,
-                $"afftdn=nf=-35:nr={Math.Clamp(options.DenoiseReductionDb, 1, 30):0.#}:tn=1"));
+                $"afftdn=nf={tuning?.NoiseFloorDb ?? -35:0.###}:nr={tuning?.DenoiseReductionDb ?? Math.Clamp(options.DenoiseReductionDb, 1, 30):0.###}:tn={(tuning?.TrackNoise ?? true ? 1 : 0)}"));
         }
 
         if (options.ReduceRoomTone)
         {
-            filters.Add("highpass=f=65");
-            filters.Add("adynamicequalizer=dfrequency=300:tfrequency=300:dqfactor=1:tqfactor=1:threshold=0.06:ratio=1.5:range=2:mode=cutabove:attack=30:release=250");
+            filters.Add(string.Create(CultureInfo.InvariantCulture, $"highpass=f={tuning?.RoomHighpassHz ?? 65:0.###}"));
+            // A bell's center gain is squared by adynamicequalizer, so its range is half the center dB cut.
+            filters.Add(string.Create(CultureInfo.InvariantCulture,
+                $"adynamicequalizer=dfrequency={tuning?.RoomFrequencyHz ?? 300:0.###}:tfrequency={tuning?.RoomFrequencyHz ?? 300:0.###}:dqfactor=1:tqfactor=1:threshold=0.06:ratio=1.5:range={tuning?.RoomReductionDb / 2 ?? 2:0.###}:mode=cutabove:attack=30:release=250"));
         }
 
         if (options.ReduceReverb)
@@ -940,16 +949,24 @@ public sealed class FfmpegAudioProcessor
             filters.Add(string.Create(
                 CultureInfo.InvariantCulture,
                 $"adynamicequalizer=dfrequency=420:tfrequency=420:dqfactor=1:tqfactor=1:threshold=0.04:ratio={1 + amount:0.##}:range={1 + 3 * amount:0.##}:mode=cutabove:attack=25:release=220"));
+            var tailThreshold = tuning is null ? .012 : Math.Pow(10, tuning.TailThresholdDb / 20);
             filters.Add(string.Create(CultureInfo.InvariantCulture,
-                $"agate=threshold=0.012:ratio={1 + amount:0.##}:range=0.35:attack=15:release=250:makeup=1"));
+                $"agate=threshold={tailThreshold:0.########}:ratio={1 + amount:0.##}:range=0.35:attack=15:release={tuning?.TailReleaseMs ?? 250:0.###}:makeup=1"));
         }
 
         if (options.EnhanceVoiceEq)
         {
-            filters.Add("equalizer=f=160:t=q:w=0.9:g=2");
-            filters.Add("equalizer=f=320:t=q:w=1.0:g=-1");
-            filters.Add("equalizer=f=3200:t=q:w=1.0:g=1");
-            filters.Add("acompressor=threshold=-18dB:ratio=2.2:attack=8:release=120:makeup=1.5dB");
+            var voice = options.VoiceTuning ?? new VoiceToneTuning();
+            voice.Validate();
+            if (voice.ThicknessDb > 0)
+            {
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"equalizer=f=160:t=q:w=0.9:g={voice.ThicknessDb:0.###}"));
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"equalizer=f=320:t=q:w=1.0:g={-voice.ThicknessDb / 2:0.###}"));
+            }
+            if (voice.ClarityDb > 0)
+                filters.Add(string.Create(CultureInfo.InvariantCulture, $"equalizer=f=3200:t=q:w=1.0:g={voice.ClarityDb:0.###}"));
+            if (voice.UseCompression)
+                filters.Add("acompressor=threshold=-18dB:ratio=2.2:attack=8:release=120:makeup=1.5dB");
         }
 
         if (options.EnableThreeBandEq || options.EnableDeEsser)

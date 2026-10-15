@@ -22,6 +22,10 @@ internal static class WorkSessionChecks
         File.WriteAllText(path,"{");try{AudioWorkSessionFile.Read(path);throw new Exception("Bad JSON accepted");}catch(InvalidDataException){Check(true,"Malformed work JSON reports a readable failure");}
         File.WriteAllText(path,new string(' ',AudioWorkSessionFile.MaximumBytes+1));try{AudioWorkSessionFile.Read(path);throw new Exception("Oversized work accepted");}catch(InvalidDataException){Check(true,"Oversized work is rejected before deserialization");}
         Check(AudioWorkSessionFile.ResolvePath("source.wav",root)==Path.Combine(root,"source.wav"),"Relative project sources resolve against the work file folder");
+        var nested = Path.Combine(root, "portable-assets", "source.wav");
+        var relative = AudioWorkSessionFile.RelativePath(nested, root);
+        Check(relative == "portable-assets/source.wav" && AudioWorkSessionFile.ResolvePath(relative, root) == nested,
+            "Nested project sources use portable separators and resolve on the current platform");
         var input=Path.Combine(root,"work_chapter_source.wav");
         var start=new ProcessStartInfo(ffmpeg){UseShellExecute=false,CreateNoWindow=true,RedirectStandardError=true};
         foreach(var arg in new[]{"-y","-f","lavfi","-i","aevalsrc=if(between(t\\,0.2\\,0.8)\\,0\\,0.3*sin(2*PI*440*t)):s=48000:d=1","-c:a","pcm_s16le",input})start.ArgumentList.Add(arg);

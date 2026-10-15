@@ -7,13 +7,15 @@ public sealed class DeepFilterNetAudioProcessor
 {
     public static string? TryFindDeepFilterNet(string? baseDirectory = null)
     {
-        var fromPath = FindInPath("deep-filter.exe");
+        var name = OperatingSystem.IsWindows() ? "deep-filter.exe" : "deep-filter";
+        var fromPath = FindInPath(name);
         if (fromPath is not null)
         {
             return fromPath;
         }
 
-        return BundledAudioToolLocator.Find("DeepFilterNet", ["deep-filter.exe"], baseDirectory);
+        return BundledAudioToolLocator.Find("DeepFilterNet", [name], baseDirectory)
+            ?? new[] { "/opt/homebrew/bin/deep-filter", "/usr/local/bin/deep-filter" }.FirstOrDefault(File.Exists);
     }
 
     public async Task<string> ProcessAsync(
@@ -76,7 +78,7 @@ public sealed class DeepFilterNetAudioProcessor
         {
             var detail = string.IsNullOrWhiteSpace(error) ? output : error;
             throw new InvalidOperationException(
-                $"DeepFilterNet 處理失敗，ExitCode={process.ExitCode}。請確認 deep-filter.exe 是 Windows x64 版本，且輸入音檔可以轉成 WAV。{TrimMessage(detail)}");
+                $"DeepFilterNet 處理失敗，ExitCode={process.ExitCode}。請確認執行檔符合目前作業系統與處理器，且輸入音檔可以轉成 WAV。{TrimMessage(detail)}");
         }
 
         return FindOutputPath(inputWavPath, outputFolder)

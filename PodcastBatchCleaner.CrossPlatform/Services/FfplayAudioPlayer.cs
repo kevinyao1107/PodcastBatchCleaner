@@ -1,154 +1,130 @@
 using System.Diagnostics;
+using System.Globalization;
+using Avalonia.Threading;
+using PodcastBatchCleaner.Core.Services;
 
 namespace PodcastBatchCleaner.CrossPlatform.Services;
 
+public sealed class AudioPlaybackErrorEventArgs(Exception error) : EventArgs
+{ public Exception ErrorException { get; } = error; }
+public readonly record struct AudioDuration(TimeSpan TimeSpan)
+{ public bool HasTimeSpan => TimeSpan > TimeSpan.Zero; }
+
 public sealed class FfplayAudioPlayer : IDisposable
 {
+    private readonly FfmpegAudioProcessor _processor = new();
+    private readonly Stopwatch _elapsed = new();
     private Process? _process;
-    private string? _currentPath;
-    private TimeSpan _startedAtPosition;
-    private DateTimeOffset _startedAt;
-    private bool _isPaused;
-
-    public bool IsPlaying => _process is { HasExited: false } && !_isPaused;
-
+    private CancellationTokenSource? _opening;
+    private TimeSpan _position;
+    private bool _ready, _wantPlay;
+    public Func<string?>? ResolveFfmpeg { get; set; }
+    public Uri? Source { get; private set; }
+    public AudioDuration NaturalDuration { get; private set; }
+    public event EventHandler? MediaOpened;
+    public event EventHandler? MediaEnded;
+    public event EventHandler<AudioPlaybackErrorEventArgs>? MediaFailed;
     public TimeSpan Position
     {
-        get
+        get => _position + _elapsed.Elapsed;
+        set
         {
-            if (_process is null || _process.HasExited)
+            var playing = _wantPlay;
+            StopProcess();
+            _position = TimeSpan.FromSeconds(Math.Clamp(value.TotalSeconds, 0,
+                NaturalDuration.HasTimeSpan ? NaturalDuration.TimeSpan.TotalSeconds : double.MaxValue));
+            if (playing && _ready) StartProcess();
+        }
+    }
+    public void Open(Uri source)
+    {
+        Close(); Source = source;
+        var cancellation = new CancellationTokenSource(); _opening = cancellation;
+        _ = OpenAsync(source, cancellation);
+    }
+    private async Task OpenAsync(Uri source, CancellationTokenSource cancellation)
+    {
+        try
+        {
+            var ffmpeg = ResolveFfmpeg?.Invoke() ?? FfmpegAudioProcessor.TryFindFfmpeg()
+                ?? throw new FileNotFoundException("播放前請指定 FFmpeg（需包含 ffplay）。");
+            var duration = await _processor.ProbeDurationAsync(ffmpeg, source.LocalPath, cancellation.Token);
+            if (cancellation.IsCancellationRequested || _opening != cancellation) return;
+            NaturalDuration = new AudioDuration(duration ?? TimeSpan.Zero); _ready = true;
+            MediaOpened?.Invoke(this, EventArgs.Empty);
+            if (_wantPlay && _process is null) StartProcess();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            if (_opening != cancellation) return;
+            _wantPlay = false; _ready = false; Source = null; NaturalDuration = default;
+            MediaFailed?.Invoke(this, new(ex));
+        }
+    }
+    public void Play() { _wantPlay = true; if (_ready && _process is null) StartProcess(); }
+    public void Pause() { _position = Position; _wantPlay = false; StopProcess(); }
+    public void Stop() { _wantPlay = false; StopProcess(); _position = TimeSpan.Zero; }
+    public void Close()
+    {
+        _opening?.Cancel(); _opening?.Dispose(); _opening = null;
+        Stop(); Source = null; _ready = false; NaturalDuration = default;
+    }
+    private string FindFfplay()
+    {
+        var name = OperatingSystem.IsWindows() ? "ffplay.exe" : "ffplay";
+        var ffmpeg = ResolveFfmpeg?.Invoke();
+        if (ffmpeg is not null && File.Exists(Path.Combine(Path.GetDirectoryName(ffmpeg)!, name)))
+            return Path.Combine(Path.GetDirectoryName(ffmpeg)!, name);
+        return BundledAudioToolLocator.Find("FFmpeg", [name], null)
+            ?? (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(folder => Path.Combine(folder, name)).FirstOrDefault(File.Exists)
+            ?? new[] { "/opt/homebrew/bin/ffplay", "/usr/local/bin/ffplay", "/usr/bin/ffplay" }.FirstOrDefault(File.Exists)
+            ?? throw new FileNotFoundException("找不到 ffplay，請安裝完整 FFmpeg 工具組。");
+    }
+    private void StartProcess()
+    {
+        if (Source is null) return;
+        try
+        {
+            var info = new ProcessStartInfo { FileName = FindFfplay(), UseShellExecute = false,
+                CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
+            foreach (var argument in new[] { "-nodisp", "-autoexit", "-hide_banner", "-loglevel", "error", "-ss",
+                _position.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture), "-i", Source.LocalPath })
+                info.ArgumentList.Add(argument);
+            var process = Process.Start(info) ?? throw new InvalidOperationException("無法啟動 ffplay。");
+            _process = process; _elapsed.Restart();
+            _ = ObserveExitAsync(process);
+        }
+        catch (Exception ex) { _wantPlay = false; MediaFailed?.Invoke(this, new(ex)); }
+    }
+    private async Task ObserveExitAsync(Process process)
+    {
+        try
+        {
+            var errorTask = process.StandardError.ReadToEndAsync();
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            var error = await errorTask; await outputTask;
+            var exitCode = process.ExitCode;
+            Dispatcher.UIThread.Post(() =>
             {
-                return TimeSpan.Zero;
-            }
-
-            return _isPaused
-                ? _startedAtPosition
-                : _startedAtPosition + (DateTimeOffset.Now - _startedAt);
+                if (_process != process) return;
+                _process = null; _elapsed.Reset(); _wantPlay = false; process.Dispose();
+                if (exitCode == 0) MediaEnded?.Invoke(this, EventArgs.Empty);
+                else MediaFailed?.Invoke(this, new(new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? "播放器無法輸出音訊。" : error.Trim())));
+            });
         }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or IOException) { }
     }
-
-    public async Task PlayAsync(string ffplayPath, string audioPath, TimeSpan? startAt = null)
+    private void StopProcess()
     {
-        Stop();
-
-        _currentPath = audioPath;
-        _startedAtPosition = startAt ?? TimeSpan.Zero;
-        _startedAt = DateTimeOffset.Now;
-        _isPaused = false;
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = ffplayPath,
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            CreateNoWindow = true
-        };
-
-        startInfo.ArgumentList.Add("-nodisp");
-        startInfo.ArgumentList.Add("-autoexit");
-        startInfo.ArgumentList.Add("-hide_banner");
-
-        if (_startedAtPosition > TimeSpan.Zero)
-        {
-            startInfo.ArgumentList.Add("-ss");
-            startInfo.ArgumentList.Add(_startedAtPosition.TotalSeconds.ToString("0.###"));
-        }
-
-        startInfo.ArgumentList.Add(audioPath);
-
-        _process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("無法啟動 ffplay。");
-
-        _ = Task.Run(() => DrainAsync(_process.StandardError));
-        _ = Task.Run(() => DrainAsync(_process.StandardOutput));
-
-        await Task.CompletedTask;
+        _elapsed.Reset(); var process = _process; _process = null;
+        if (process is null) return;
+        try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+        catch (InvalidOperationException) { }
+        finally { process.Dispose(); }
     }
-
-    public void PauseOrResume()
-    {
-        if (_process is null || _process.HasExited)
-        {
-            return;
-        }
-
-        if (!_isPaused)
-        {
-            _startedAtPosition = Position;
-        }
-        else
-        {
-            _startedAt = DateTimeOffset.Now;
-        }
-
-        _isPaused = !_isPaused;
-
-        try
-        {
-            _process.StandardInput.Write("p");
-            _process.StandardInput.Flush();
-        }
-        catch
-        {
-            // ffplay may close stdin near the end of playback.
-        }
-    }
-
-    public async Task SeekAsync(string ffplayPath, TimeSpan position)
-    {
-        if (_currentPath is null)
-        {
-            return;
-        }
-
-        await PlayAsync(ffplayPath, _currentPath, position);
-    }
-
-    public void Stop()
-    {
-        var process = _process;
-        _process = null;
-        _isPaused = false;
-        _startedAtPosition = TimeSpan.Zero;
-
-        if (process is null || process.HasExited)
-        {
-            return;
-        }
-
-        try
-        {
-            process.Kill(entireProcessTree: true);
-        }
-        catch
-        {
-            // Process may have already exited.
-        }
-        finally
-        {
-            process.Dispose();
-        }
-    }
-
-    public void Dispose()
-    {
-        Stop();
-    }
-
-    private static async Task DrainAsync(StreamReader reader)
-    {
-        try
-        {
-            while (!reader.EndOfStream)
-            {
-                await reader.ReadLineAsync();
-            }
-        }
-        catch
-        {
-            // Best-effort output drain.
-        }
-    }
+    public void Dispose() => Close();
 }

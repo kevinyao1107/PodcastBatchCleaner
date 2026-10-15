@@ -1,637 +1,213 @@
-using System.Collections.ObjectModel;
-using System.ComponentModel;
-using System.Globalization;
-using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
-using PodcastBatchCleaner.CrossPlatform.Services;
-using PodcastBatchCleaner.Core.Models;
+using Avalonia.VisualTree;
 using PodcastBatchCleaner.Core.Services;
+using PodcastBatchCleaner.Core.Models;
 
 namespace PodcastBatchCleaner.CrossPlatform;
 
-public sealed partial class MainWindow : Window, INotifyPropertyChanged
+public partial class MainWindow
 {
-    private readonly FfmpegAudioProcessor _processor = new();
-    private readonly FfplayAudioPlayer _player = new();
-    private readonly DispatcherTimer _playbackTimer;
-    private CancellationTokenSource? _processingCancellation;
-    private AudioFileItem? _selectedFile;
-    private string? _currentFolder;
-    private string? _outputFolder;
-    private string? _aiAudioFolder;
-    private string? _ffmpegPath;
-    private string? _ffplayPath;
-    private bool _isDraggingPosition;
-    private bool _isProcessing;
-    private double _silenceSeconds = 0.1;
-    private double _silenceThresholdDb = -35;
-    private bool _enableDenoise = true;
-    private bool _useAiProcessedAudio;
-    private bool _reduceRoomTone;
-    private bool _enhanceVoiceEq;
-    private bool _normalizeLoudness = true;
-    private bool _enableLimiter = true;
-    private double _volumeGainDb;
-    private int _playbackSourceIndex;
-    private string _statusText = "請先選取資料夾。";
-    private string _playbackPositionText = "00:00";
-    private string _playbackDurationText = "00:00";
-
-    public MainWindow()
+    private AudioFileItem? _draggedRow;
+    private readonly bool _persistUserSettings;
+    private Avalonia.Point _dragStart;
+    public MainWindow() : this(true) { }
+    internal MainWindow(bool loadSettings)
     {
+        _persistUserSettings = loadSettings;
         InitializeComponent();
-        DataContext = this;
-
-        _ffmpegPath = FindTool("ffmpeg");
-        _ffplayPath = FindTool("ffplay");
-        _playbackTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(250)
-        };
+        InitializeWorkspaceUi();
+        OriginalWaveform.SeekRequested += SeekOriginalWaveform;
+        _playbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _playbackTimer.Tick += PlaybackTimer_Tick;
-
-        StatusText = _ffmpegPath is null
-            ? "找不到 FFmpeg。請指定 ffmpeg 後再輸出。"
-            : "已找到 FFmpeg，可以選取資料夾開始。";
-    }
-
-    public ObservableCollection<AudioFileItem> AudioFiles { get; } = [];
-
-    public string CurrentFolderText => _currentFolder is null
-        ? "尚未選取資料夾"
-        : $"目前資料夾：{_currentFolder}";
-
-    public string OutputFolderText => _outputFolder is null
-        ? "輸出資料夾：尚未設定，預設會建立在來源資料夾下的 processed"
-        : $"輸出資料夾：{_outputFolder}";
-
-    public string AiAudioFolderText => _aiAudioFolder is null
-        ? "AI 音檔資料夾：尚未設定"
-        : $"AI 音檔資料夾：{_aiAudioFolder}";
-
-    public string FfmpegPathText => _ffmpegPath is null
-        ? "FFmpeg：尚未找到，請指定 ffmpeg 或 ffmpeg.exe"
-        : $"FFmpeg：{_ffmpegPath}";
-
-    public string FileCountText => $"{AudioFiles.Count} 個音檔";
-
-    public string SelectedFileText => _selectedFile is null
-        ? "尚未選取音檔"
-        : $"目前選取：{_selectedFile.FileName}";
-
-    public string StatusText
-    {
-        get => _statusText;
-        set => SetField(ref _statusText, value);
-    }
-
-    public string PlaybackPositionText
-    {
-        get => _playbackPositionText;
-        set => SetField(ref _playbackPositionText, value);
-    }
-
-    public string PlaybackDurationText
-    {
-        get => _playbackDurationText;
-        set => SetField(ref _playbackDurationText, value);
-    }
-
-    public double SilenceSeconds
-    {
-        get => _silenceSeconds;
-        set => SetField(ref _silenceSeconds, Math.Clamp(Math.Round(value, 1), 0.1, 1.0));
-    }
-
-    public double SilenceThresholdDb
-    {
-        get => _silenceThresholdDb;
-        set => SetField(ref _silenceThresholdDb, Math.Clamp(Math.Round(value), -80, -5));
-    }
-
-    public bool EnableDenoise
-    {
-        get => _enableDenoise;
-        set => SetField(ref _enableDenoise, value);
-    }
-
-    public bool UseAiProcessedAudio
-    {
-        get => _useAiProcessedAudio;
-        set => SetField(ref _useAiProcessedAudio, value);
-    }
-
-    public bool ReduceRoomTone
-    {
-        get => _reduceRoomTone;
-        set => SetField(ref _reduceRoomTone, value);
-    }
-
-    public bool EnhanceVoiceEq
-    {
-        get => _enhanceVoiceEq;
-        set => SetField(ref _enhanceVoiceEq, value);
-    }
-
-    public bool NormalizeLoudness
-    {
-        get => _normalizeLoudness;
-        set => SetField(ref _normalizeLoudness, value);
-    }
-
-    public bool EnableLimiter
-    {
-        get => _enableLimiter;
-        set => SetField(ref _enableLimiter, value);
-    }
-
-    public double VolumeGainDb
-    {
-        get => _volumeGainDb;
-        set => SetField(ref _volumeGainDb, Math.Clamp(Math.Round(value, 1), -24, 24));
-    }
-
-    public int PlaybackSourceIndex
-    {
-        get => _playbackSourceIndex;
-        set => SetField(ref _playbackSourceIndex, value);
-    }
-
-    public new event PropertyChangedEventHandler? PropertyChanged;
-
-    protected override void OnClosing(WindowClosingEventArgs e)
-    {
-        _processingCancellation?.Cancel();
-        _playbackTimer.Stop();
-        _player.Dispose();
-        base.OnClosing(e);
-    }
-
-    private async void SelectFolder_Click(object? sender, RoutedEventArgs e)
-    {
-        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        _player.MediaOpened += Player_MediaOpened;
+        _player.MediaEnded += Player_MediaEnded;
+        _player.MediaFailed += Player_MediaFailed;
+        _player.ResolveFfmpeg = () => _ffmpegPath;
+        DataContext = this;
+        if (loadSettings) LoadSettings();
+        if (loadSettings) Opened += (_, _) => Window_Loaded(this, new RoutedEventArgs());
+        AudioList.KeyDown += (_, e) =>
         {
-            Title = "選取要處理音檔的資料夾",
-            AllowMultiple = false
-        });
-
-        var folder = folders.FirstOrDefault();
-        if (folder?.Path.LocalPath is not { Length: > 0 } path)
+            if ((e.KeyModifiers & KeyModifiers.Alt) == 0) return;
+            if (e.Key == Key.Up) { MoveSelectedUp_Click(this, new RoutedEventArgs()); e.Handled = true; }
+            if (e.Key == Key.Down) { MoveSelectedDown_Click(this, new RoutedEventArgs()); e.Handled = true; }
+        };
+        PositionSlider.AddHandler(InputElement.PointerPressedEvent, PositionSlider_PointerPressed, RoutingStrategies.Tunnel, true);
+        PositionSlider.AddHandler(InputElement.PointerReleasedEvent, PositionSlider_PointerReleased, RoutingStrategies.Tunnel, true);
+        PositionSlider.KeyUp += (_, e) =>
         {
-            return;
+            if (e.Key is Key.Left or Key.Right or Key.Home or Key.End or Key.PageUp or Key.PageDown) SeekToSlider();
+        };
+        AudioList.AddHandler(InputElement.PointerPressedEvent, AudioList_PointerPressed, RoutingStrategies.Tunnel, true);
+        AudioList.AddHandler(InputElement.PointerReleasedEvent, AudioList_PointerReleased, RoutingStrategies.Tunnel, true);
+    }
+
+    private void Window_Closing(object? sender, WindowClosingEventArgs e)
+    {
+        if (!CanStartWork || _durationLoadingCancellation is not null)
+        {
+            e.Cancel = true; _closeAfterWork = true;
+            _processingCancellation?.Cancel(); _analysisCancellation?.Cancel();
+            _folderLoadingCancellation?.Cancel();
+            _durationLoadingCancellation?.Cancel();
+            StatusText = "正在停止工作並關閉..."; return;
         }
-
-        _currentFolder = path;
-        _outputFolder ??= Path.Combine(path, "processed");
-        OnPropertyChanged(nameof(CurrentFolderText));
-        OnPropertyChanged(nameof(OutputFolderText));
-
-        await LoadAudioFilesAsync(path);
+        SaveSettings(); _durationLoadingCancellation?.Cancel(); _playbackTimer.Stop(); _player.Close();
     }
 
-    private async void ChooseOutputFolder_Click(object? sender, RoutedEventArgs e)
+    private async Task<string?> PickFolderAsync(string title)
     {
-        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
-        {
-            Title = "選取處理後音檔輸出資料夾",
-            AllowMultiple = false
-        });
-
-        var folder = folders.FirstOrDefault();
-        if (folder?.Path.LocalPath is not { Length: > 0 } path)
-        {
-            return;
-        }
-
-        _outputFolder = path;
-        OnPropertyChanged(nameof(OutputFolderText));
-        StatusText = "已設定輸出資料夾。";
+        try { return (await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = title })).FirstOrDefault()?.TryGetLocalPath(); }
+        catch (Exception ex) { StatusText = $"無法選取資料夾：{ex.Message}"; return null; }
     }
-
-    private async void ChooseAiAudioFolder_Click(object? sender, RoutedEventArgs e)
+    private async Task<string?> PickFileAsync(string title, string[]? patterns = null, string? saveName = null)
     {
-        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
-        {
-            Title = "選取 AI 處理後音檔資料夾",
-            AllowMultiple = false
-        });
-
-        var folder = folders.FirstOrDefault();
-        if (folder?.Path.LocalPath is not { Length: > 0 } path)
-        {
-            return;
-        }
-
-        _aiAudioFolder = path;
-        UseAiProcessedAudio = true;
-        OnPropertyChanged(nameof(AiAudioFolderText));
-        StatusText = "已設定 AI 音檔資料夾。";
-    }
-
-    private async void ChooseFfmpeg_Click(object? sender, RoutedEventArgs e)
-    {
-        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-        {
-            Title = "選取 ffmpeg",
-            AllowMultiple = false
-        });
-
-        var file = files.FirstOrDefault();
-        if (file?.Path.LocalPath is not { Length: > 0 } path)
-        {
-            return;
-        }
-
-        _ffmpegPath = path;
-        _ffplayPath = FindSiblingTool(path, "ffplay") ?? _ffplayPath;
-        OnPropertyChanged(nameof(FfmpegPathText));
-        StatusText = "已設定 FFmpeg。";
-    }
-
-    private async Task LoadAudioFilesAsync(string folder)
-    {
-        StopPlayback();
-        AudioFiles.Clear();
-        OnPropertyChanged(nameof(FileCountText));
-        StatusText = "正在掃描資料夾...";
-
-        var files = await Task.Run(() => Directory
-            .EnumerateFiles(folder, "*.*", SearchOption.TopDirectoryOnly)
-            .Where(FfmpegAudioProcessor.IsSupportedAudioFile)
-            .OrderBy(path => path, StringComparer.CurrentCultureIgnoreCase)
-            .ToList());
-
-        foreach (var file in files)
-        {
-            AudioFiles.Add(new AudioFileItem { FilePath = file });
-        }
-
-        OnPropertyChanged(nameof(FileCountText));
-        StatusText = files.Count == 0 ? "這個資料夾沒有支援的音檔。" : $"已載入 {files.Count} 個音檔。";
-
-        if (_ffmpegPath is not null)
-        {
-            _ = LoadDurationsAsync(AudioFiles.ToList());
-        }
-    }
-
-    private async Task LoadDurationsAsync(IReadOnlyList<AudioFileItem> items)
-    {
-        var ffmpegPath = _ffmpegPath;
-        if (ffmpegPath is null)
-        {
-            return;
-        }
-
-        foreach (var item in items)
-        {
-            try
-            {
-                item.Duration = await _processor.ProbeDurationAsync(ffmpegPath, item.FilePath);
-            }
-            catch
-            {
-                item.Duration = null;
-            }
-        }
-    }
-
-    private async void ProcessSelected_Click(object? sender, RoutedEventArgs e)
-    {
-        var selected = AudioList.SelectedItem as AudioFileItem;
-        await ProcessItemsAsync(selected is null ? [] : [selected]);
-    }
-
-    private async void ProcessAll_Click(object? sender, RoutedEventArgs e)
-    {
-        await ProcessItemsAsync(AudioFiles.ToList());
-    }
-
-    private void CancelProcessing_Click(object? sender, RoutedEventArgs e)
-    {
-        _processingCancellation?.Cancel();
-        StatusText = "正在取消處理...";
-    }
-
-    private async Task ProcessItemsAsync(IReadOnlyList<AudioFileItem> items)
-    {
-        if (_isProcessing)
-        {
-            StatusText = "目前已經在處理中。";
-            return;
-        }
-
-        if (items.Count == 0)
-        {
-            StatusText = "沒有可處理的音檔。";
-            return;
-        }
-
-        var ffmpegPath = _ffmpegPath;
-        if (ffmpegPath is null || !File.Exists(ffmpegPath))
-        {
-            StatusText = "請先指定 ffmpeg。";
-            return;
-        }
-
-        _outputFolder ??= _currentFolder is null
-            ? Path.Combine(AppContext.BaseDirectory, "processed")
-            : Path.Combine(_currentFolder, "processed");
-
-        OnPropertyChanged(nameof(OutputFolderText));
-        Directory.CreateDirectory(_outputFolder);
-
-        _isProcessing = true;
-        _processingCancellation = new CancellationTokenSource();
-
-        var options = new AudioProcessingOptions(
-            SilenceSeconds,
-            SilenceThresholdDb,
-            EnableDenoise,
-            ReduceRoomTone,
-            false,
-            FfmpegAudioProcessor.DefaultReverbReductionAmount,
-            EnhanceVoiceEq,
-            NormalizeLoudness,
-            EnableLimiter,
-            VolumeGainDb,
-            FfmpegAudioProcessor.KeepOriginalChannelMode,
-            0,
-            _outputFolder);
-
         try
         {
-            for (var index = 0; index < items.Count; index++)
-            {
-                var item = items[index];
-                _processingCancellation.Token.ThrowIfCancellationRequested();
-
-                item.IsProcessing = true;
-                item.Status = $"處理中 {index + 1}/{items.Count}";
-                StatusText = $"處理中：{item.FileName}";
-
-                var processingInputPath = GetProcessingInputPath(item);
-                if (!string.Equals(processingInputPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
-                {
-                    item.Status = "使用 AI 檔";
-                    StatusText = $"使用 AI 音檔：{item.FileName}";
-                }
-                else if (UseAiProcessedAudio)
-                {
-                    item.Status = "未找到 AI 檔";
-                    StatusText = $"找不到 AI 音檔，使用原檔：{item.FileName}";
-                }
-
-                var outputPath = FfmpegAudioProcessor.MakeOutputPath(
-                    item.FilePath,
-                    options.OutputFolder,
-                    item.CustomOutputFileName);
-                await _processor.ProcessAsync(
-                    ffmpegPath,
-                    processingInputPath,
-                    outputPath,
-                    options,
-                    cancellationToken: _processingCancellation.Token);
-
-                item.ProcessedPath = outputPath;
-                item.Status = "完成";
-                item.IsProcessing = false;
-            }
-
-            StatusText = "處理完成。";
+            var type = new FilePickerFileType(title) { Patterns = patterns ?? ["*"] };
+            if (saveName is not null)
+                return (await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+                { Title = title, SuggestedFileName = saveName, FileTypeChoices = [type], ShowOverwritePrompt = true }))?.TryGetLocalPath();
+            return (await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            { Title = title, FileTypeFilter = [type, FilePickerFileTypes.All] })).FirstOrDefault()?.TryGetLocalPath();
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) { StatusText = $"無法選取檔案：{ex.Message}"; return null; }
+    }
+
+    private async void SelectFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFolderAsync("選取音檔資料夾") is not { } path || !CanStartWork) return;
+        try { await LoadAudioFilesAsync(path); } catch (Exception ex) { StatusText = $"載入失敗：{ex.Message}"; }
+    }
+    private async void ChooseOutputFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFolderAsync("選取輸出資料夾") is not { } path || !CanStartWork) return;
+        _outputFolder = path; OnPropertyChanged(nameof(OutputFolderText));
+    }
+    private async void ChooseAiAudioFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFolderAsync("選取 AI 音檔資料夾") is not { } path || !CanStartWork) return;
+        _aiAudioFolder = path; UseAiProcessedAudio = true; OnPropertyChanged(nameof(AiAudioFolderText));
+    }
+    private async void ChooseFfmpeg_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("選取 ffmpeg 執行檔") is not { } path || !CanStartWork) return;
+        _ffmpegPath = path; OnPropertyChanged(nameof(FfmpegPathText));
+    }
+    private async void ChooseDeepFilterNet_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("選取 deep-filter 執行檔") is not { } path || !CanStartWork) return;
+        _deepFilterNetPath = path; EnableDeepFilterNet = true;
+        OnPropertyChanged(nameof(DeepFilterNetPathText)); OnPropertyChanged(nameof(DeepFilterNetStatusText));
+    }
+    private async void ChooseVoiceFixer_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("選取 VoiceFixer 執行檔或啟動腳本") is not { } path || !CanStartWork) return;
+        _voiceFixerPath = path; EnableVoiceFixerDereverb = true;
+        OnPropertyChanged(nameof(VoiceFixerPathText)); OnPropertyChanged(nameof(VoiceFixerStatusText));
+    }
+    private static readonly string[] AudioPatterns = ["*.wav", "*.mp3", "*.m4a", "*.aac", "*.flac", "*.ogg", "*.wma", "*.mp4"];
+    private async void ChooseIntroAudio_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("選取片頭音檔", AudioPatterns) is not { } path || !CanStartWork) return;
+        _introAudioPath = path; OnPropertyChanged(nameof(IntroAudioText));
+    }
+    private async void ChooseOutroAudio_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("選取片尾音檔", AudioPatterns) is not { } path || !CanStartWork) return;
+        _outroAudioPath = path; OnPropertyChanged(nameof(OutroAudioText));
+    }
+    private async void ChooseCoverImage_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("選取封面圖片", ["*.jpg", "*.jpeg", "*.png", "*.webp", "*.bmp"]) is not { } path || !CanStartWork) return;
+        _coverImagePath = path; OnPropertyChanged(nameof(CoverImageText));
+    }
+    private async void SaveWork_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("保存工作檔", ["*.podcast-work.json"], "episode.podcast-work.json") is not { } path || !CanStartWork) return;
+        try { SaveWorkSession(path); } catch (Exception ex) { WorkSessionText = StatusText = $"保存失敗：{ex.Message}"; }
+    }
+    private async void LoadWork_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("恢復工作檔", ["*.json"]) is not { } path || !CanStartWork) return;
+        try { LoadWorkSession(path); } catch (Exception ex) { WorkSessionText = StatusText = $"恢復失敗：{ex.Message}"; }
+    }
+    private async void RelinkWorkAudio_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("重新指定音檔", AudioPatterns) is not { } path || !CanStartWork) return;
+        try { RelinkWorkAudio(path); } catch (Exception ex) { StatusText = ex.Message; }
+    }
+    private async void ImportPortablePresets_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("匯入共用預設", ["*.json"]) is not { } path || !CanStartWork) return;
+        try
         {
-            foreach (var item in items.Where(item => item.IsProcessing))
-            {
-                item.IsProcessing = false;
-                item.Status = "已取消";
-            }
-
-            StatusText = "處理已取消。";
+            if (new FileInfo(path).Length > 1024 * 1024) throw new InvalidDataException("預設不可超過 1 MB。");
+            var presets = PortablePresetFile.Parse(await File.ReadAllTextAsync(path));
+            if (PortablePresets.Count + presets.Count > 100) throw new InvalidDataException("最多 100 組預設。");
+            foreach (var preset in presets) PortablePresets.Add(preset);
+            SelectedPortablePreset = presets.FirstOrDefault(); SaveSettings(); StatusText = $"已匯入 {presets.Count} 組預設。";
         }
-        catch (Exception ex)
+        catch (Exception ex) { StatusText = $"匯入失敗：{ex.Message}"; }
+    }
+    private async void ExportPortablePresets_Click(object sender, RoutedEventArgs e)
+    {
+        if (await PickFileAsync("匯出共用預設", ["*.json"], "AudioStudio_presets.json") is not { } path || !CanStartWork) return;
+        try
         {
-            foreach (var item in items.Where(item => item.IsProcessing))
-            {
-                item.IsProcessing = false;
-                item.Status = "失敗";
-            }
-
-            StatusText = $"處理失敗：{ex.Message}";
+            await File.WriteAllTextAsync(path, PortablePresetFile.Serialize(PortablePresets.Count > 0 ? PortablePresets : [CapturePortablePreset()]));
+            StatusText = "已匯出共用預設。";
         }
-        finally
+        catch (Exception ex) { StatusText = $"匯出失敗：{ex.Message}"; }
+    }
+    private void AudioList_DoubleTapped(object? sender, TappedEventArgs e)
+    {
+        if (e.Source is Control control && (control is TextBox || control.FindAncestorOfType<TextBox>() is not null)) return;
+        OpenSelectedForPlayback(true);
+    }
+    private void AudioList_PointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        _draggedRow = null;
+        if (!CanStartWork || !e.GetCurrentPoint(AudioList).Properties.IsLeftButtonPressed) return;
+        if (e.Source is not Control control || control is TextBox || control.FindAncestorOfType<TextBox>() is not null) return;
+        _draggedRow = (control as DataGridRow ?? control.FindAncestorOfType<DataGridRow>())?.DataContext as AudioFileItem;
+        _dragStart = e.GetPosition(AudioList);
+    }
+    private void AudioList_PointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        var source = _draggedRow; _draggedRow = null;
+        var point = e.GetPosition(AudioList);
+        if (!CanStartWork || source is null || (Math.Abs(point.X - _dragStart.X) < 8 && Math.Abs(point.Y - _dragStart.Y) < 8)) return;
+        var target = AudioList.GetVisualDescendants().OfType<DataGridRow>()
+            .FirstOrDefault(row => new Avalonia.Rect(row.Bounds.Size).Contains(e.GetPosition(row)))?.DataContext as AudioFileItem;
+        if (target is null || source == target) return;
+        var from = AudioFiles.IndexOf(source); var to = AudioFiles.IndexOf(target);
+        if (from < 0 || to < 0) return;
+        AudioFiles.Move(from, to); AudioList.SelectedItem = source; AudioList.ScrollIntoView(source, null);
+        StatusText = "已調整合併順序。";
+    }
+    private void PositionSlider_PointerPressed(object? sender, PointerPressedEventArgs e) => _isDraggingPosition = true;
+    private void PositionSlider_PointerReleased(object? sender, PointerReleasedEventArgs e)
+    { _isDraggingPosition = false; SeekToSlider(); }
+    private void OpenFolder(string folder) => OpenLocation(folder, false);
+    private void OpenFileLocation(string path) => OpenLocation(path, true);
+    private void OpenLocation(string path, bool reveal)
+    {
+        try
         {
-            _isProcessing = false;
-            _processingCancellation?.Dispose();
-            _processingCancellation = null;
+            var info = new ProcessStartInfo { UseShellExecute = false, CreateNoWindow = true };
+            if (OperatingSystem.IsWindows())
+            { info.FileName = "explorer.exe"; if (reveal) info.ArgumentList.Add("/select,"); info.ArgumentList.Add(path); }
+            else if (OperatingSystem.IsMacOS())
+            { info.FileName = "/usr/bin/open"; if (reveal) info.ArgumentList.Add("-R"); info.ArgumentList.Add(path); }
+            else { info.FileName = "xdg-open"; info.ArgumentList.Add(reveal ? Path.GetDirectoryName(path)! : path); }
+            Process.Start(info)?.Dispose();
         }
-    }
-
-    private void AudioList_SelectionChanged(object? sender, SelectionChangedEventArgs e)
-    {
-        _selectedFile = AudioList.SelectedItem as AudioFileItem;
-        OnPropertyChanged(nameof(SelectedFileText));
-    }
-
-    private string GetProcessingInputPath(AudioFileItem item)
-    {
-        if (!UseAiProcessedAudio)
-        {
-            return item.FilePath;
-        }
-
-        var aiPath = FfmpegAudioProcessor.FindAiProcessedAudio(item.FilePath, _aiAudioFolder);
-        return aiPath ?? item.FilePath;
-    }
-
-    private void PlaybackSource_SelectionChanged(object? sender, SelectionChangedEventArgs e)
-    {
-        StopPlayback();
-    }
-
-    private async void Play_Click(object? sender, RoutedEventArgs e)
-    {
-        await PlaySelectedAsync(TimeSpan.Zero);
-    }
-
-    private void Pause_Click(object? sender, RoutedEventArgs e)
-    {
-        _player.PauseOrResume();
-        StatusText = "已切換暫停/播放。";
-    }
-
-    private void Stop_Click(object? sender, RoutedEventArgs e)
-    {
-        StopPlayback();
-    }
-
-    private void PositionSlider_PointerPressed(object? sender, Avalonia.Input.PointerPressedEventArgs e)
-    {
-        _isDraggingPosition = true;
-    }
-
-    private async void PositionSlider_PointerReleased(object? sender, Avalonia.Input.PointerReleasedEventArgs e)
-    {
-        _isDraggingPosition = false;
-        if (_player.IsPlaying && _ffplayPath is not null)
-        {
-            await _player.SeekAsync(_ffplayPath, TimeSpan.FromSeconds(PositionSlider.Value));
-        }
-    }
-
-    private void PositionSlider_ValueChanged(object? sender, Avalonia.Controls.Primitives.RangeBaseValueChangedEventArgs e)
-    {
-        if (_isDraggingPosition)
-        {
-            PlaybackPositionText = FormatTime(TimeSpan.FromSeconds(PositionSlider.Value));
-        }
-    }
-
-    private async Task PlaySelectedAsync(TimeSpan startAt)
-    {
-        if (_selectedFile is null)
-        {
-            StatusText = "請先選取音檔。";
-            return;
-        }
-
-        if (_ffplayPath is null || !File.Exists(_ffplayPath))
-        {
-            StatusText = "找不到 ffplay，請指定包含 ffplay 的 FFmpeg 資料夾。";
-            return;
-        }
-
-        var path = GetPlaybackPath(_selectedFile);
-        if (path is null)
-        {
-            StatusText = "這個音檔還沒有處理後版本。";
-            return;
-        }
-
-        var duration = string.Equals(path, _selectedFile.FilePath, StringComparison.Ordinal)
-            ? _selectedFile.Duration : null;
-        duration ??= await ProbeDurationAsync(path);
-        duration ??= TimeSpan.Zero;
-        PositionSlider.Maximum = Math.Max(1, duration.Value.TotalSeconds);
-        PlaybackDurationText = FormatTime(duration.Value);
-
-        await _player.PlayAsync(_ffplayPath, path, startAt);
-        _playbackTimer.Start();
-        StatusText = $"播放：{Path.GetFileName(path)}";
-    }
-
-    private async Task<TimeSpan?> ProbeDurationAsync(string path)
-    {
-        var ffmpegPath = _ffmpegPath;
-        if (ffmpegPath is null)
-        {
-            return null;
-        }
-
-        return await _processor.ProbeDurationAsync(ffmpegPath, path);
-    }
-
-    private string? GetPlaybackPath(AudioFileItem item)
-    {
-        if (PlaybackSourceIndex == 1)
-        {
-            return item.HasProcessedFile ? item.ProcessedPath : null;
-        }
-
-        return item.FilePath;
-    }
-
-    private void PlaybackTimer_Tick(object? sender, EventArgs e)
-    {
-        if (_isDraggingPosition)
-        {
-            return;
-        }
-
-        var position = _player.Position;
-        PositionSlider.Value = Math.Min(PositionSlider.Maximum, position.TotalSeconds);
-        PlaybackPositionText = FormatTime(position);
-    }
-
-    private void StopPlayback()
-    {
-        _player.Stop();
-        _playbackTimer.Stop();
-        PositionSlider.Value = 0;
-        PlaybackPositionText = "00:00";
-        StatusText = "已停止。";
-    }
-
-    private static string? FindTool(string baseName)
-    {
-        if (baseName == "ffmpeg") return FfmpegAudioProcessor.TryFindFfmpeg();
-        var executableName = OperatingSystem.IsWindows() ? $"{baseName}.exe" : baseName;
-        var bundled = BundledAudioToolLocator.Find("FFmpeg", [executableName], null);
-        if (bundled is not null) return bundled;
-        var fromPath = FindInPath(executableName);
-        if (fromPath is not null)
-        {
-            return fromPath;
-        }
-
-        var local = Path.Combine(AppContext.BaseDirectory, executableName);
-        if (File.Exists(local))
-        {
-            return local;
-        }
-
-        var localTools = Path.Combine(AppContext.BaseDirectory, "tools", executableName);
-        return File.Exists(localTools) ? localTools : null;
-    }
-
-    private static string? FindSiblingTool(string selectedToolPath, string siblingBaseName)
-    {
-        var directory = Path.GetDirectoryName(selectedToolPath);
-        if (directory is null)
-        {
-            return null;
-        }
-
-        var executableName = OperatingSystem.IsWindows() ? $"{siblingBaseName}.exe" : siblingBaseName;
-        var sibling = Path.Combine(directory, executableName);
-        return File.Exists(sibling) ? sibling : null;
-    }
-
-    private static string? FindInPath(string fileName)
-    {
-        var paths = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-        return paths
-            .Select(path => Path.Combine(path, fileName))
-            .FirstOrDefault(File.Exists);
-    }
-
-    private static string FormatTime(TimeSpan value)
-    {
-        return value.TotalHours >= 1
-            ? value.ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture)
-            : value.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
-    }
-
-    private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
-    {
-        if (EqualityComparer<T>.Default.Equals(field, value))
-        {
-            return false;
-        }
-
-        field = value;
-        OnPropertyChanged(propertyName);
-        return true;
-    }
-
-    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
-    {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        catch (Exception ex) { StatusText = $"開啟位置失敗：{ex.Message}"; }
     }
 }

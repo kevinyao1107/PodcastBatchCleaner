@@ -7,7 +7,10 @@ public sealed class VoiceFixerAudioProcessor
 {
     public static string? TryFindVoiceFixer(string? baseDirectory = null)
     {
-        foreach (var fileName in new[] { "voicefixer.exe", "voicefixer.cmd", "voicefixer.bat", "voicefixer" })
+        var names = OperatingSystem.IsWindows()
+            ? new[] { "voicefixer.exe", "voicefixer.cmd", "voicefixer.bat", "voicefixer" }
+            : new[] { "voicefixer", "voicefixer.sh" };
+        foreach (var fileName in names)
         {
             var fromPath = FindInPath(fileName);
             if (fromPath is not null)
@@ -16,8 +19,7 @@ public sealed class VoiceFixerAudioProcessor
             }
         }
 
-        return BundledAudioToolLocator.Find("VoiceFixer",
-            ["voicefixer.exe", "voicefixer.cmd", "voicefixer.bat", "voicefixer"], baseDirectory);
+        return BundledAudioToolLocator.Find("VoiceFixer", names, baseDirectory);
     }
 
     public async Task<string> ProcessAsync(
@@ -31,6 +33,8 @@ public sealed class VoiceFixerAudioProcessor
 
         var isCommandScript = string.Equals(Path.GetExtension(voiceFixerPath), ".cmd", StringComparison.OrdinalIgnoreCase)
             || string.Equals(Path.GetExtension(voiceFixerPath), ".bat", StringComparison.OrdinalIgnoreCase);
+        if (isCommandScript && !OperatingSystem.IsWindows())
+            throw new InvalidOperationException("macOS / Linux 請指定可執行的 VoiceFixer 啟動腳本；不能使用 Windows cmd / bat。");
         var startInfo = new ProcessStartInfo
         {
             FileName = isCommandScript ? "cmd.exe" : voiceFixerPath,
