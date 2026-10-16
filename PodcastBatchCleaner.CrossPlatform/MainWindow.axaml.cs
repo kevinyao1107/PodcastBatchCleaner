@@ -30,6 +30,7 @@ public partial class MainWindow
         _player.ResolveFfmpeg = () => _ffmpegPath;
         DataContext = this;
         if (loadSettings) LoadSettings();
+        InitializeWorkSafety(loadSettings);
         if (loadSettings) Opened += (_, _) => Window_Loaded(this, new RoutedEventArgs());
         AudioList.KeyDown += (_, e) =>
         {
@@ -49,6 +50,7 @@ public partial class MainWindow
 
     private void Window_Closing(object? sender, WindowClosingEventArgs e)
     {
+        if (_safetyModalOpen || _safetyDecisionPending) { e.Cancel = true; return; }
         if (!CanStartWork || _durationLoadingCancellation is not null)
         {
             e.Cancel = true; _closeAfterWork = true;
@@ -57,7 +59,11 @@ public partial class MainWindow
             _durationLoadingCancellation?.Cancel();
             StatusText = "正在停止工作並關閉..."; return;
         }
-        SaveSettings(); _durationLoadingCancellation?.Cancel(); _playbackTimer.Stop(); _player.Close();
+        if (!_allowSafetyClose && _interactiveSafety && HasUnsavedWork)
+        { e.Cancel = true; _ = HandleDirtyCloseAsync(); return; }
+        DisposeWorkSafety();
+        if (!_discardOnSafetyClose) SaveSettings();
+        _durationLoadingCancellation?.Cancel(); _playbackTimer.Stop(); _player.Close();
     }
 
     private async Task<string?> PickFolderAsync(string title)
@@ -82,6 +88,7 @@ public partial class MainWindow
     private async void SelectFolder_Click(object sender, RoutedEventArgs e)
     {
         if (await PickFolderAsync("選取音檔資料夾") is not { } path || !CanStartWork) return;
+        if (!await ConfirmLeaveWorkAsync(false)) return;
         try { await LoadAudioFilesAsync(path); } catch (Exception ex) { StatusText = $"載入失敗：{ex.Message}"; }
     }
     private async void ChooseOutputFolder_Click(object sender, RoutedEventArgs e)
@@ -135,6 +142,7 @@ public partial class MainWindow
     private async void LoadWork_Click(object sender, RoutedEventArgs e)
     {
         if (await PickFileAsync("恢復工作檔", ["*.json"]) is not { } path || !CanStartWork) return;
+        if (!await ConfirmLeaveWorkAsync(false)) return;
         try { LoadWorkSession(path); } catch (Exception ex) { WorkSessionText = StatusText = $"恢復失敗：{ex.Message}"; }
     }
     private async void RelinkWorkAudio_Click(object sender, RoutedEventArgs e)

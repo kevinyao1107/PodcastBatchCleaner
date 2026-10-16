@@ -9,6 +9,8 @@
   <ItemGroup>
     <Compile Include="CrossPlatformChecks.cs" />
     <Compile Include="CleanupTuningChecks.cs" />
+    <Compile Include="WorkDraftChecks.cs" />
+    <Compile Include="SafetyWorkflowChecks.cs" />
     <PackageReference Include="Avalonia.Headless" Version="11.3.22" />
     <ProjectReference Include="../PodcastBatchCleaner.CrossPlatform/PodcastBatchCleaner.CrossPlatform.csproj" />
   </ItemGroup>

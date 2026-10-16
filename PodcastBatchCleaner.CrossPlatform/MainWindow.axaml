@@ -97,6 +97,7 @@
           <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
         <TextBlock VerticalAlignment="Center" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" Foreground="{StaticResource MutedTextBrush}" />
+        <TextBlock Grid.Column="1" MaxWidth="340" VerticalAlignment="Center" Text="{Binding WorkSaveStateText}" TextTrimming="CharacterEllipsis" Foreground="{StaticResource MutedTextBrush}" ToolTip.Tip="{Binding WorkSaveStateText}" IsVisible="{Binding IsWorkStatusVisible}" />
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" IsVisible="{Binding IsProgressVisible}">
           <TextBlock Width="220" VerticalAlignment="Center" Text="{Binding CurrentProcessingFileText}" TextTrimming="CharacterEllipsis" Foreground="{StaticResource MutedTextBrush}" />
           <ProgressBar Width="180" Height="10" Margin="10,0,8,0" Minimum="0" Maximum="100" Value="{Binding ProcessingProgress}" />
@@ -143,6 +144,9 @@
           <Button Click="CompareSelected_Click" Content="A/B 比較" IsEnabled="{Binding CanExportSelection}" Margin="0,0,6,0" Padding="10,6" HorizontalContentAlignment="Center" />
         </WrapPanel>
       </Grid>
+    </Border>
+    <Border DockPanel.Dock="Bottom" Padding="18,8" Background="#282315" BorderBrush="#6B5529" BorderThickness="0,1,0,0" IsVisible="{Binding HasResultWarning}">
+      <TextBlock Text="{Binding ProcessedResultText}" TextWrapping="Wrap" Foreground="#F4C96B" />
     </Border>
     <Grid Margin="0" x:Name="WorkspaceGrid">
       <Grid.ColumnDefinitions>
@@ -218,7 +222,8 @@
                   <TextBox Text="{Binding SelectedAudioItem.CustomOutputFileName, Mode=TwoWay}" MinWidth="64" x:Name="SelectedOutputNameTextBox" ToolTip.Tip="留空使用原檔名加 _processed；只影響目前音檔。" />
                 </StackPanel>
               </Grid>
-              <TextBlock Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" FontSize="12" Text="{Binding SelectedAudioItem.ProcessedFileName}" Margin="0,8,0,0" ToolTip.Tip="{Binding SelectedAudioItem.ProcessedPath}" />
+              <TextBlock Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" FontSize="12" Text="{Binding ProcessedResultText}" Margin="0,8,0,0" ToolTip.Tip="{Binding ProcessedResultText}" />
+              <TextBlock Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" FontSize="12" Text="{Binding SelectedAudioItem.ProcessedFileName}" Margin="0,4,0,0" ToolTip.Tip="{Binding SelectedAudioItem.ProcessedPath}" />
             </StackPanel>
           </Border>
         </Grid>

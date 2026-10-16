@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="CrossPlatformChecks.cs" />
+    <Compile Remove="SafetyWorkflowChecks.cs" />
     <None Include="fixtures/*.json" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="..\PodcastBatchCleanerWpf.csproj" />
   </ItemGroup>

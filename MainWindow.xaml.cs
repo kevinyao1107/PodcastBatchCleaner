@@ -158,6 +158,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         DataContext = this;
         if (loadSettings) LoadSettings();
+        InitializeWorkSafety(loadSettings);
     }
 
 #endif
@@ -276,6 +277,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         get => _isAnalyzing;
         set
         {
+            if (value && !_isAnalyzing && _safetyReady && HasUnsavedWork) FlushWorkDraft();
             if (SetField(ref _isAnalyzing, value))
             {
                 OnPropertyChanged(nameof(CanStartWork));
@@ -294,7 +296,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             OnPropertyChanged(nameof(CanReviewEpisode));
         }
     }
-    public bool CanStartWork => !_isProcessing && !_isAnalyzing && !IsLoadingFiles;
+    public bool CanStartWork => !_isProcessing && !_isAnalyzing && !IsLoadingFiles && !_safetyModalOpen && !_safetyDecisionPending;
 
     public string ProcessingWarningsText => string.Join(Environment.NewLine, _processingWarnings)
         + (_processingWarningCount > _processingWarnings.Count
@@ -313,6 +315,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         get => _isProcessing;
         private set
         {
+            if (value && !_isProcessing && _safetyReady && HasUnsavedWork) FlushWorkDraft();
             if (SetField(ref _isProcessing, value))
             {
                 if (value)
@@ -737,6 +740,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ? "找不到 FFmpeg。播放可使用；輸出前請指定 ffmpeg.exe。"
             : "已找到 FFmpeg，可以選取資料夾開始。";
 
+        if (await TryRecoverWorkDraftAsync()) return;
         if (!string.IsNullOrWhiteSpace(_currentFolder) && Directory.Exists(_currentFolder))
         {
             try { await LoadAudioFilesAsync(_currentFolder); }
@@ -750,6 +754,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 #if !CROSS_PLATFORM
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (_safetyModalOpen || _safetyDecisionPending) { e.Cancel = true; return; }
         if (!CanStartWork || _durationLoadingCancellation is not null)
         {
             e.Cancel = true;
@@ -761,7 +766,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             StatusText = "正在停止工作並關閉...";
             return;
         }
-        SaveSettings();
+        if (!_allowSafetyClose && _interactiveSafety && HasUnsavedWork)
+        { e.Cancel = true; _ = HandleDirtyCloseAsync(); return; }
+        DisposeWorkSafety();
+        if (!_discardOnSafetyClose) SaveSettings();
         _processingCancellation?.Cancel();
         _analysisCancellation?.Cancel();
         _durationLoadingCancellation?.Cancel();
@@ -785,7 +793,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        await LoadAudioFilesAsync(dialog.SelectedPath);
+        if (await ConfirmLeaveWorkAsync(false)) await LoadAudioFilesAsync(dialog.SelectedPath);
     }
 
 #endif
@@ -1037,6 +1045,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             foreach (var file in files) AudioFiles.Add(new AudioFileItem { FilePath = file });
             OnPropertyChanged(nameof(CurrentFolderText)); OnPropertyChanged(nameof(OutputFolderText));
             OnPropertyChanged(nameof(FileCountText));
+            MarkImportedFolder();
             StatusText = files.Count == 0 ? "這個資料夾沒有支援的音檔。" : $"已載入 {files.Count} 個音檔。";
             _ = LoadDurationsAsync(AudioFiles.ToList());
         }
@@ -1276,6 +1285,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : Path.Combine(_currentFolder, "processed");
 
         OnPropertyChanged(nameof(OutputFolderText));
+        if (!await ConfirmExportAsync(items))
+        { StatusText = "輸出已取消或設定已變更，請重新確認。"; return; }
         var preflightErrors = ValidateProcessingInputs(items, ffmpegPath, _outputFolder);
         if (preflightErrors.Count > 0)
         {
@@ -1325,7 +1336,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ffmpegPath = await EnsureOutputEncoderAsync(ffmpegPath, progressWindow, _processingCancellation.Token);
             if (MergeSegments)
             {
+                var episodeKey = CaptureEpisodeKey(items);
                 var mergedOutputPath = await ProcessMergedItemsAsync(ffmpegPath, items, options, progressWindow);
+                RememberEpisodeResult(items, episodeKey, mergedOutputPath);
                 summary.SuccessCount = items.Count;
                 summary.OutputPath = mergedOutputPath;
                 StatusText = "統整輸出完成。";
@@ -1333,6 +1346,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
+            var renderKeys = items.ToDictionary(item => item, item => CaptureRenderKey(item));
             var total = items.Count;
             for (var index = 0; index < total; index++)
             {
@@ -1476,6 +1490,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                     RecordCompletedProcessingTool("FFmpeg");
                     item.ProcessedPath = outputPath;
+                    RememberRenderedResult(item, renderKeys[item], "完整輸出");
                     item.Status = "完成";
                     item.IsProcessing = false;
                     summary.SuccessCount++;
@@ -1845,6 +1860,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task ProcessComparisonAsync(AudioFileItem item)
     {
+        var renderKind = MatchComparisonLoudness ? "A/B 目前設定（等響度）" : "A/B 目前設定（原響度）";
         if (!CanStartWork)
         {
             StatusText = "目前已經在處理中。";
@@ -1896,6 +1912,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             var processingInputPath = GetProcessingInputPath(item);
             ffmpegPath = await EnsureOutputEncoderAsync(ffmpegPath, progressWindow, _processingCancellation.Token);
+            var renderKey = CaptureRenderKey(item, renderKind);
             var sourceDuration = await GetProcessingDurationAsync(ffmpegPath, item, processingInputPath,
                 _processingCancellation.Token);
 
@@ -2062,6 +2079,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             RecordCompletedProcessingTool("FFmpeg");
             item.Status = "比較完成";
             item.ProcessedPath = outputs[1];
+            RememberRenderedResult(item, renderKey, renderKind);
             StatusText = $"A/B 比較完成：{comparisonFolder}";
             ShowComparisonSummary(comparisonFolder, outputs);
         }
@@ -2147,6 +2165,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             item.IsProcessing = true;
             item.Status = "產生試聽";
             ffmpegPath = await EnsureOutputEncoderAsync(ffmpegPath, progressWindow, _processingCancellation.Token);
+            var renderKey = CaptureRenderKey(item, "30 秒試聽");
             StatusText = $"產生 30 秒試聽：{item.FileName}";
 
             var processingInputPath = GetProcessingInputPath(item);
@@ -2296,6 +2315,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             item.ProcessedPath = outputPath;
             RecordCompletedProcessingTool("FFmpeg");
+            RememberRenderedResult(item, renderKey, "30 秒試聽");
             item.Status = "試聽完成";
             ProcessingProgress = 100;
             ProcessingProgressText = "100%";
@@ -3378,11 +3398,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 #endif
 #if !CROSS_PLATFORM
-    private void LoadWork_Click(object sender, RoutedEventArgs e)
+    private async void LoadWork_Click(object sender, RoutedEventArgs e)
     {
         if (!CanStartWork) return;
         var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "音訊工作檔|*.podcast-work.json|JSON|*.json" };
         if (dialog.ShowDialog(this) != true) return;
+        if (!await ConfirmLeaveWorkAsync(false)) return;
         try { LoadWorkSession(dialog.FileName); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or ArgumentException)
         { WorkSessionText = $"恢復工作檔失敗：{ex.Message}"; StatusText = WorkSessionText; }
@@ -3401,16 +3422,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
     private void SaveWorkSession(string path)
     {
-        var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
-        var settings = CaptureAppSettings();
-        settings.FfmpegPath = settings.DeepFilterNetPath = settings.VoiceFixerPath = null;
-        settings.PortablePresets = null;
-        ConvertWorkPaths(settings, folder, true);
-        var files = AudioFiles.Select(item => new WorkAudioFile(AudioWorkSessionFile.RelativePath(item.FilePath, folder),
-            item.CustomOutputFileName, item.TrimStartText, item.TrimEndText)).ToList();
-        AudioWorkSessionFile.Write(path, new AudioWorkSession(AudioWorkSessionFile.Format, 1, JsonSerializer.SerializeToElement(settings), files));
-        WorkSessionText = $"已保存工作檔：{Path.GetFileName(path)}（{files.Count} 個音檔；只保存路徑與設定）";
-        StatusText = $"工作已保存：{Path.GetFileName(path)}";
+        var work = CreateWorkDocument(path);
+        AudioWorkSessionFile.Write(path, work);
+        MarkWorkSaved(path);
+        WorkSessionText = $"已保存工作檔：{Path.GetFileName(path)}（{work.Files.Count} 個音檔；只保存路徑與設定）";
+        StatusText = $"已寫入工作檔：{Path.GetFileName(path)}";
     }
     private void LoadWorkSession(string path)
     {
@@ -3464,6 +3480,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         WorkSessionText = $"已恢復 {restored.Count} 個音檔。" + (missing.Count == 0 ? "來源均存在。" :
             $"找不到 {missing.Count} 個來源／附件，請重新指定：{Environment.NewLine}{string.Join(Environment.NewLine, missing.Take(20))}" + (missing.Count > 20 ? $"{Environment.NewLine}其餘 {missing.Count - 20} 項未列出。" : ""));
         StatusText = $"已恢復工作：{Path.GetFileName(path)}，{restored.Count} 個音檔，{missing.Count} 個缺失來源／附件。";
+        _renderReceipts.Clear(); _episodeReceipt = null;
+        MarkWorkSaved(path);
         if (_ffmpegPath is not null && File.Exists(_ffmpegPath)) _ = LoadDurationsAsync(restored.Where(item => File.Exists(item.FilePath)).ToList());
     }
 #if !CROSS_PLATFORM
@@ -3893,6 +3911,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Play_Click(object sender, RoutedEventArgs e)
     {
+        RefreshSafetyUi();
         if (PlaybackSourceIndex == 3 && !CanPlayEffectPreview)
         { OpenSelectedForPlayback(false); StatusText = "單項比較尚未就緒或已過期。"; return; }
         if (PlaybackSourceIndex == 2 && !CanReviewEpisode) { StatusText = "整集尚未就緒，或正在處理音檔。"; return; }
@@ -4161,6 +4180,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (propertyName is nameof(SelectedFileText) or nameof(FileCountText) or nameof(CanStartWork)
             or nameof(MergeSegments) or nameof(PlaybackSourceIndex) or nameof(CanReviewEpisode) or nameof(ProcessingToolsText))
             RefreshWorkspaceUi();
+        if (propertyName is nameof(SelectedFileText) or nameof(FileCountText) or nameof(CanStartWork) or nameof(PlaybackSourceIndex) or nameof(IsProgressVisible))
+            RefreshSafetyUi();
         if (propertyName is nameof(SelectedFileText) or nameof(CanStartWork) or nameof(SelectedCleanupEffect)
             or nameof(VoiceThicknessDb) or nameof(VoiceClarityDb) or nameof(UseVoiceCompression)
             or nameof(EnableAdvancedCleanup) or nameof(TrackNoise) or nameof(FineDenoiseDb) or nameof(NoiseFloorDb)

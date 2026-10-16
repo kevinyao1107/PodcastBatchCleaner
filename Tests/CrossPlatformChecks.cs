@@ -17,7 +17,7 @@ using PodcastBatchCleaner.CrossPlatform;
 using PodcastBatchCleaner.CrossPlatform.Controls;
 using PodcastBatchCleaner.CrossPlatform.Services;
 
-internal static class CrossPlatformChecks
+internal static partial class CrossPlatformChecks
 {
     private static int _checks;
     private static readonly BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
@@ -125,6 +125,8 @@ internal static class CrossPlatformChecks
                 FolderChecks(ffmpeg, output);
                 ProcessingChecks(window, ffmpeg, output);
                 CleanupWorkflowChecks(ffmpeg, output);
+                WorkDraftChecks.Run(output);
+                SafetyWorkflowChecks(ffmpeg, output);
             }
             shell.Close(); Console.WriteLine($"PASS: {_checks} cross-platform checks. Screenshots: {output}"); return 0;
         }
